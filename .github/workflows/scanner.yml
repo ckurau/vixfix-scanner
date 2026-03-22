@@ -7,8 +7,9 @@ on:
   workflow_dispatch:  # allows manual trigger from GitHub UI
 
 jobs:
-  scan:
+  vixfix-scan:
     runs-on: ubuntu-latest
+    name: BB + VixFix Divergence Scan
 
     steps:
       - name: Checkout repository
@@ -23,9 +24,33 @@ jobs:
         run: |
           pip install yfinance pandas numpy requests
 
-      - name: Run scanner and send email
+      - name: Run VixFix scanner and send email
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
         run: |
           python scanner.py
+
+  stochastic-scan:
+    runs-on: ubuntu-latest
+    name: BB + Stochastic Divergence Scan
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance pandas numpy requests
+
+      - name: Run Stochastic scanner and send email
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: |
+          python scanner_stoch.py
