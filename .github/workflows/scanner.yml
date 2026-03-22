@@ -1,0 +1,31 @@
+name: Weekly VixFix Scanner
+
+on:
+  schedule:
+    # 2pm PST = 10pm UTC (22:00) every Friday
+    - cron: '0 22 * * 5'
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance pandas numpy requests
+
+      - name: Run scanner and send email
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: |
+          python scanner.py
