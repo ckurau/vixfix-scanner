@@ -122,3 +122,19 @@ jobs:
           else:
               print('\n(Manual run — no email sent. View results above.)')
           EOF
+
+  backtest:
+    runs-on: ubuntu-latest
+    name: Backtest Both Scans
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy requests
+      - name: Run backtest and email report
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: python backtest.py
