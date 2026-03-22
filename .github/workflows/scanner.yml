@@ -1,56 +1,124 @@
-name: Weekly VixFix Scanner
+name: Weekly Stock Scanners
 
 on:
   schedule:
-    # 2pm PST = 10pm UTC (22:00) every Friday
+    # 2pm PST = 10pm UTC every Friday
     - cron: '0 22 * * 5'
-  workflow_dispatch:  # allows manual trigger from GitHub UI
+  workflow_dispatch:  # manual trigger — no email, view results in Actions log
 
 jobs:
   vixfix-scan:
     runs-on: ubuntu-latest
     name: BB + VixFix Divergence Scan
-
+    outputs:
+      results: ${{ steps.scan.outputs.results }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install yfinance pandas numpy requests
-
-      - name: Run VixFix scanner and send email
+      - run: pip install yfinance pandas numpy requests
+      - name: Run VixFix scanner
+        id: scan
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          SEND_EMAIL: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
         run: |
           python scanner.py
+          RESULTS=$(cat results_vixfix.txt 2>/dev/null | tr '\n' ',' || echo "")
+          echo "results=$RESULTS" >> $GITHUB_OUTPUT
 
   stochastic-scan:
     runs-on: ubuntu-latest
     name: BB + Stochastic Divergence Scan
-
+    outputs:
+      results: ${{ steps.scan.outputs.results }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install yfinance pandas numpy requests
-
-      - name: Run Stochastic scanner and send email
+      - run: pip install yfinance pandas numpy requests
+      - name: Run Stochastic scanner
+        id: scan
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          SEND_EMAIL: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
         run: |
           python scanner_stoch.py
+          RESULTS=$(cat results_stoch.txt 2>/dev/null | tr '\n' ',' || echo "")
+          echo "results=$RESULTS" >> $GITHUB_OUTPUT
+
+  compare-results:
+    runs-on: ubuntu-latest
+    name: Compare Both Scans
+    needs: [vixfix-scan, stochastic-scan]
+    steps:
+      - name: Compare and display results
+        env:
+          VIXFIX_RESULTS: ${{ needs.vixfix-scan.outputs.results }}
+          STOCH_RESULTS: ${{ needs.stochastic-scan.outputs.results }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          SEND_EMAIL: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+          TO_EMAIL: bkcolby@yahoo.com
+        run: |
+          python3 - << 'EOF'
+          import os, smtplib
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+
+          vixfix = sorted(set(t for t in os.environ.get('VIXFIX_RESULTS','').split(',') if t.strip()))
+          stoch  = sorted(set(t for t in os.environ.get('STOCH_RESULTS','').split(',') if t.strip()))
+          both   = sorted(set(vixfix) & set(stoch))
+
+          # Always print to log — visible in GitHub Actions on your phone
+          sep = '=' * 45
+          print(sep)
+          print('BB + VIXFIX DIVERGENCE RESULTS')
+          print(sep)
+          print('\n'.join(vixfix) if vixfix else 'No matches.')
+          print(f'Total: {len(vixfix)}')
+          print()
+          print(sep)
+          print('BB + STOCHASTIC DIVERGENCE RESULTS')
+          print(sep)
+          print('\n'.join(stoch) if stoch else 'No matches.')
+          print(f'Total: {len(stoch)}')
+          print()
+          print(sep)
+          print('APPEARS IN BOTH SCANS')
+          print(sep)
+          print('\n'.join(both) if both else 'No tickers appear in both scans.')
+          print(f'Total: {len(both)}')
+
+          # Only email on scheduled Friday runs
+          if os.environ.get('SEND_EMAIL') == 'true':
+              sep = '=' * 45
+              body  = f'BB + VIXFIX DIVERGENCE RESULTS\n{sep}\n'
+              body += '\n'.join(vixfix) if vixfix else 'No matches.'
+              body += f'\nTotal: {len(vixfix)}\n\n'
+              body += f'BB + STOCHASTIC DIVERGENCE RESULTS\n{sep}\n'
+              body += '\n'.join(stoch) if stoch else 'No matches.'
+              body += f'\nTotal: {len(stoch)}\n\n'
+              body += f'APPEARS IN BOTH SCANS\n{sep}\n'
+              body += '\n'.join(both) if both else 'No tickers appear in both scans.'
+              body += f'\nTotal: {len(both)}'
+
+              msg = MIMEMultipart()
+              msg['From']    = os.environ['GMAIL_USER']
+              msg['To']      = os.environ['TO_EMAIL']
+              msg['Subject'] = 'Weekly Stock Scan Results'
+              msg.attach(MIMEText(body, 'plain'))
+              try:
+                  with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
+                      s.login(os.environ['GMAIL_USER'], os.environ['GMAIL_PASSWORD'])
+                      s.sendmail(os.environ['GMAIL_USER'], os.environ['TO_EMAIL'], msg.as_string())
+                  print('\nEmail sent successfully.')
+              except Exception as e:
+                  print(f'\nEmail failed: {e}')
+          else:
+              print('\n(Manual run — no email sent. View results above.)')
+          EOF
