@@ -8,7 +8,7 @@ import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# ── Scan settings (must match scanner.py and scanner_stoch.py exactly) ─────────
+# ── Scan settings ──────────────────────────────────────────────────────────────
 BB_LENGTH      = 20
 BB_MULT        = 2.0
 VF_PD          = 30
@@ -25,8 +25,11 @@ LOOKBACK       = 10
 YEAR_HIGH_BARS = 52
 
 # ── Backtest settings ──────────────────────────────────────────────────────────
-HOLD_WEEKS     = 10      # Max holding period
-WIN_TARGET     = 0.13    # 13% gain = win
+HOLD_WEEKS     = 10
+WIN_TARGET     = 0.13        # 13% gain = win
+POSITION_SIZE  = 5000.0      # $5,000 per trade
+
+# ── Filters ────────────────────────────────────────────────────────────────────
 MIN_PRICE      = 5.0
 MIN_MARKET_CAP = 1_000_000_000
 
@@ -61,7 +64,7 @@ def get_all_tickers():
     print(f'Total tickers fetched: {len(tickers)}')
     return tickers
 
-# ── Step 2: VixFix indicators ──────────────────────────────────────────────────
+# ── Step 2: VixFix signals ─────────────────────────────────────────────────────
 def compute_vixfix(df):
     close = df['Close']
     low   = df['Low']
@@ -101,7 +104,6 @@ def compute_vixfix(df):
     return trigger_with_vf, wvf_at_trigger, low
 
 def find_vixfix_signals(df):
-    """Find all historical bars where VixFix divergence signal fired"""
     trigger_with_vf, wvf_at_trigger, low = compute_vixfix(df)
     twvf  = trigger_with_vf.values
     wvf_v = wvf_at_trigger.values
@@ -125,17 +127,17 @@ def find_vixfix_signals(df):
                 continue
             if recent_low < prior_low and recent_wvf > prior_wvf:
                 signals.append({
-                    'signal_idx': recent_idx,
+                    'signal_idx':  recent_idx,
                     'signal_date': df.index[recent_idx],
                     'entry_price': float(df['Close'].iloc[recent_idx]),
-                    'stop_loss': float(low_v[recent_idx])  # low of second trigger
+                    'stop_loss':   float(low_v[recent_idx])
                 })
                 break
 
     return signals
 
-# ── Step 3: Stochastic indicators ─────────────────────────────────────────────
-def compute_stoch(df):
+# ── Step 3: Stochastic signals ─────────────────────────────────────────────────
+def find_stoch_signal_bars(df):
     close = df['Close']
     high  = df['High']
     low   = df['Low']
@@ -165,11 +167,6 @@ def compute_stoch(df):
     year_high        = high.rolling(YEAR_HIGH_BARS).max()
     below_high_limit = close <= 0.85 * year_high
 
-    return valid_pair, stoch_div, no_break, below_high_limit
-
-def find_stoch_signal_bars(df):
-    """Return set of bar indices where stoch scan is active"""
-    valid_pair, stoch_div, no_break, below_high_limit = compute_stoch(df)
     vp  = valid_pair.values
     sd  = stoch_div.values
     nb  = no_break.values
@@ -190,19 +187,17 @@ def find_stoch_signal_bars(df):
 
 # ── Step 4: Backtest a single signal ──────────────────────────────────────────
 def backtest_signal(df, signal):
-    """
-    Entry: close of signal bar
-    Win:   price rises 13% above entry within HOLD_WEEKS
-    Loss:  price closes below stop loss (second trigger low)
-    Neutral: neither — return actual % change at week 10
-    """
     idx        = signal['signal_idx']
     entry      = signal['entry_price']
     stop_loss  = signal['stop_loss']
     win_target = entry * (1 + WIN_TARGET)
     n          = len(df)
 
-    result = 'NEUTRAL'
+    # Position sizing
+    shares     = POSITION_SIZE / entry
+    cost_basis = shares * entry
+
+    result     = 'NEUTRAL'
     exit_price = None
     exit_week  = None
 
@@ -215,44 +210,47 @@ def backtest_signal(df, signal):
         week_low   = float(df['Low'].iloc[future_idx])
         week_close = float(df['Close'].iloc[future_idx])
 
-        # Check win first (high touched target)
+        # Win: intraday high touched target
         if week_high >= win_target:
             result     = 'WIN'
             exit_price = win_target
             exit_week  = w
             break
 
-        # Check stop loss (close below stop)
-        if week_close < stop_loss:
+        # Stop loss: intraday low pierced stop level
+        if week_low <= stop_loss:
             result     = 'LOSS'
-            exit_price = week_close
+            exit_price = stop_loss
             exit_week  = w
             break
 
-    # Neutral — use close at week 10 or last available
+    # Neutral: use close at week 10 or last available bar
     if result == 'NEUTRAL':
         last_idx   = min(idx + HOLD_WEEKS, n - 1)
         exit_price = float(df['Close'].iloc[last_idx])
         exit_week  = min(HOLD_WEEKS, n - 1 - idx)
 
-    pct_return = (exit_price - entry) / entry * 100
+    pct_return    = (exit_price - entry) / entry * 100
+    dollar_return = shares * (exit_price - entry)
 
     return {
-        'result':     result,
-        'entry':      entry,
-        'stop_loss':  stop_loss,
-        'exit_price': exit_price,
-        'exit_week':  exit_week,
-        'pct_return': pct_return
+        'result':        result,
+        'entry':         entry,
+        'stop_loss':     stop_loss,
+        'exit_price':    exit_price,
+        'exit_week':     exit_week,
+        'pct_return':    pct_return,
+        'shares':        shares,
+        'cost_basis':    cost_basis,
+        'dollar_return': dollar_return
     }
 
 # ── Step 5: Run full backtest ──────────────────────────────────────────────────
 def run_backtest(tickers):
-    all_trades  = []
-    total       = len(tickers)
-    min_bars    = max(VF_LB + MAX_GAP, YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + HOLD_WEEKS + 10
+    all_trades = []
+    min_bars   = max(VF_LB + MAX_GAP, YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + HOLD_WEEKS + 10
 
-    print(f'Backtesting {total} tickers...')
+    print(f'Backtesting {len(tickers)} tickers...')
 
     for i, ticker in enumerate(tickers):
         try:
@@ -272,28 +270,22 @@ def run_backtest(tickers):
             except:
                 pass
 
-            # Find VixFix signals
             vf_signals = find_vixfix_signals(df)
             if not vf_signals:
                 continue
 
-            # Find Stochastic active bars
             stoch_active = find_stoch_signal_bars(df)
             if not stoch_active:
                 continue
 
-            # Only keep signals where BOTH scans agree
             for signal in vf_signals:
                 sidx = signal['signal_idx']
-                # Check if stoch scan was active within SCAN_DELAY bars of vixfix signal
                 stoch_match = any(
                     (sidx + offset) in stoch_active
                     for offset in range(-SCAN_DELAY, SCAN_DELAY + 1)
                 )
                 if not stoch_match:
                     continue
-
-                # Need future bars to evaluate
                 if sidx + 1 >= len(df):
                     continue
 
@@ -301,19 +293,22 @@ def run_backtest(tickers):
                 trade['ticker'] = ticker
                 trade['date']   = str(signal['signal_date'].date())
                 all_trades.append(trade)
-                print(f'  {ticker} {trade["date"]} → {trade["result"]} ({trade["pct_return"]:+.1f}% in {trade["exit_week"]}w)')
+                print(
+                    f'  {ticker} {trade["date"]} → {trade["result"]:<7} '
+                    f'{trade["pct_return"]:+.1f}%  ${trade["dollar_return"]:+.2f}'
+                )
 
         except Exception as e:
             print(f'  Error on {ticker}: {e}')
 
         if (i + 1) % 100 == 0:
-            print(f'  [{i + 1}/{total}] scanned — {len(all_trades)} signals found so far...')
+            print(f'  [{i + 1}/{len(tickers)}] scanned — {len(all_trades)} signals so far...')
 
         time.sleep(0.05)
 
     return all_trades
 
-# ── Step 6: Summarize results ──────────────────────────────────────────────────
+# ── Step 6: Summarize ──────────────────────────────────────────────────────────
 def summarize(trades):
     if not trades:
         return 'No historical signals found where both scans agreed.'
@@ -322,42 +317,65 @@ def summarize(trades):
     losses   = [t for t in trades if t['result'] == 'LOSS']
     neutrals = [t for t in trades if t['result'] == 'NEUTRAL']
     total    = len(trades)
-    returns  = [t['pct_return'] for t in trades]
 
-    win_rate    = len(wins) / total * 100
-    avg_return  = np.mean(returns)
-    avg_win     = np.mean([t['pct_return'] for t in wins]) if wins else 0
-    avg_loss    = np.mean([t['pct_return'] for t in losses]) if losses else 0
-    best_trade  = max(trades, key=lambda t: t['pct_return'])
-    worst_trade = min(trades, key=lambda t: t['pct_return'])
+    pct_returns    = [t['pct_return'] for t in trades]
+    dollar_returns = [t['dollar_return'] for t in trades]
 
-    sep = '=' * 50
+    win_rate       = len(wins) / total * 100
+    avg_pct        = np.mean(pct_returns)
+    avg_win_pct    = np.mean([t['pct_return'] for t in wins]) if wins else 0
+    avg_loss_pct   = np.mean([t['pct_return'] for t in losses]) if losses else 0
+    avg_dollar     = np.mean(dollar_returns)
+    avg_win_dollar = np.mean([t['dollar_return'] for t in wins]) if wins else 0
+    avg_loss_dollar= np.mean([t['dollar_return'] for t in losses]) if losses else 0
+
+    total_capital  = total * POSITION_SIZE
+    total_profit   = sum(dollar_returns)
+    total_roi      = total_profit / total_capital * 100
+
+    best_trade     = max(trades, key=lambda t: t['dollar_return'])
+    worst_trade    = min(trades, key=lambda t: t['dollar_return'])
+
+    sep = '=' * 55
     lines = [
         sep,
         'BACKTEST REPORT — BB + VixFix + Stochastic',
         'Signals where BOTH scans agreed (NYSE + NASDAQ)',
+        f'Position size: ${POSITION_SIZE:,.0f} per trade',
         sep,
-        f'Total signals:      {total}',
-        f'Wins (>+13%):       {len(wins)} ({win_rate:.1f}%)',
-        f'Losses (stop hit):  {len(losses)} ({len(losses)/total*100:.1f}%)',
-        f'Neutral (10w hold): {len(neutrals)} ({len(neutrals)/total*100:.1f}%)',
+        f'Total signals:       {total}',
+        f'Wins  (>+13%):       {len(wins)} ({win_rate:.1f}%)',
+        f'Losses (stop hit):   {len(losses)} ({len(losses)/total*100:.1f}%)',
+        f'Neutral (10w hold):  {len(neutrals)} ({len(neutrals)/total*100:.1f}%)',
         '',
-        f'Avg return:         {avg_return:+.1f}%',
-        f'Avg win:            {avg_win:+.1f}%',
-        f'Avg loss:           {avg_loss:+.1f}%',
+        '── Per Trade ─────────────────────────────────────────',
+        f'Avg return:          {avg_pct:+.1f}%  (${avg_dollar:+,.2f})',
+        f'Avg win:             {avg_win_pct:+.1f}%  (${avg_win_dollar:+,.2f})',
+        f'Avg loss:            {avg_loss_pct:+.1f}%  (${avg_loss_dollar:+,.2f})',
         '',
-        f'Best trade:  {best_trade["ticker"]} {best_trade["date"]} ({best_trade["pct_return"]:+.1f}%)',
-        f'Worst trade: {worst_trade["ticker"]} {worst_trade["date"]} ({worst_trade["pct_return"]:+.1f}%)',
+        '── Overall P&L ───────────────────────────────────────',
+        f'Total capital deployed: ${total_capital:,.2f}',
+        f'Total profit/loss:      ${total_profit:+,.2f}',
+        f'Overall ROI:            {total_roi:+.1f}%',
+        '',
+        f'Best trade:   {best_trade["ticker"]} {best_trade["date"]} '
+        f'({best_trade["pct_return"]:+.1f}%  ${best_trade["dollar_return"]:+,.2f})',
+        f'Worst trade:  {worst_trade["ticker"]} {worst_trade["date"]} '
+        f'({worst_trade["pct_return"]:+.1f}%  ${worst_trade["dollar_return"]:+,.2f})',
+        '',
         sep,
-        'ALL SIGNALS',
+        'ALL SIGNALS (sorted by date)',
         sep,
+        f'{"Ticker":<6} {"Date":<12} {"Result":<8} {"Return%":>8} {"$Return":>10} '
+        f'{"Wk":>3} {"Entry":>8} {"Stop":>8}',
+        '-' * 55,
     ]
 
-    # Sort by date
     for t in sorted(trades, key=lambda x: x['date']):
         lines.append(
-            f'{t["ticker"]:<6} {t["date"]}  {t["result"]:<7}  {t["pct_return"]:+6.1f}%  '
-            f'exit wk {t["exit_week"]}  entry ${t["entry"]:.2f}  stop ${t["stop_loss"]:.2f}'
+            f'{t["ticker"]:<6} {t["date"]:<12} {t["result"]:<8} '
+            f'{t["pct_return"]:>+7.1f}% {t["dollar_return"]:>+10,.2f} '
+            f'{t["exit_week"]:>3}w  ${t["entry"]:>7.2f}  ${t["stop_loss"]:>7.2f}'
         )
 
     lines.append(sep)
@@ -370,7 +388,6 @@ def send_email(report):
     msg['To']      = TO_EMAIL
     msg['Subject'] = 'Stock Scanner Backtest Report'
     msg.attach(MIMEText(report, 'plain'))
-
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
             s.login(GMAIL_USER, GMAIL_PASSWORD)
