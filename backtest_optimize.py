@@ -25,7 +25,7 @@ LOOKBACK       = 10
 YEAR_HIGH_BARS = 52
 
 # ── Backtest settings ──────────────────────────────────────────────────────────
-HOLD_WEEKS     = 10
+HOLD_WEEKS     = 15
 POSITION_SIZE  = 5000.0
 EXIT_TARGETS   = [i / 100 for i in range(5, 55, 5)]  # 5% to 50% in 5% steps
 
