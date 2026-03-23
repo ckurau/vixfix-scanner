@@ -8,7 +8,7 @@ import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# ── VixFix settings ────────────────────────────────────────────────────────────
+# ── Settings ───────────────────────────────────────────────────────────────────
 BB_LENGTH      = 20
 BB_MULT        = 2.0
 VF_PD          = 30
@@ -19,20 +19,18 @@ VF_PH          = 0.85
 MAX_GAP        = 35
 SCAN_DELAY     = 3
 VF_NEAR        = 2
-
-# ── Stochastic settings ────────────────────────────────────────────────────────
 STOCH_LOOKBACK = 25
 STOCH_K        = 14
 LOOKBACK       = 10
 YEAR_HIGH_BARS = 52
-
-# ── Filters ────────────────────────────────────────────────────────────────────
+MACD_FAST      = 12
+MACD_SLOW      = 26
+MACD_SIGNAL    = 9
 MIN_PRICE      = 5.0
 MIN_MARKET_CAP = 1_000_000_000
-MAX_STOP_DIST  = 0.11   # Skip signals where stop is more than 11% below entry
-NO_BREAK_BARS  = 10     # No candle in prior N bars can have lower low than trigger
+MAX_STOP_DIST  = 0.11
+NO_BREAK_BARS  = 10
 
-# ── Email settings ─────────────────────────────────────────────────────────────
 GMAIL_USER     = os.environ.get('GMAIL_USER', '')
 GMAIL_PASSWORD = os.environ.get('GMAIL_PASSWORD', '')
 TO_EMAIL       = 'bkcolby@yahoo.com'
@@ -62,19 +60,42 @@ def get_all_tickers():
     print(f'Total tickers fetched: {len(tickers)}')
     return tickers
 
+def compute_macd(close):
+    ema_fast  = close.ewm(span=MACD_FAST,   adjust=False).mean()
+    ema_slow  = close.ewm(span=MACD_SLOW,   adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal    = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    histogram = macd_line - signal
+    return macd_line.values, signal.values, histogram.values
+
 def no_break_before(low_values, idx, n_bars):
-    """Returns True if none of the prior n_bars candles have a lower low than trigger candle"""
     trigger_low = low_values[idx]
-    start = max(0, idx - n_bars)
-    for j in range(start, idx):
+    for j in range(max(0, idx - n_bars), idx):
         if low_values[j] < trigger_low:
             return False
     return True
 
-def check_vixfix(df):
-    close = df['Close']
-    low   = df['Low']
-    open_ = df['Open']
+def macd_divergence(prior_idx, recent_idx, macd_line, signal_line, histogram):
+    hist_prior  = histogram[prior_idx]
+    hist_recent = histogram[recent_idx]
+    macd_prior  = macd_line[prior_idx]
+    macd_recent = macd_line[recent_idx]
+    sig_prior   = signal_line[prior_idx]
+    sig_recent  = signal_line[recent_idx]
+
+    if any(np.isnan(v) for v in [hist_prior, hist_recent, macd_prior, macd_recent, sig_prior, sig_recent]):
+        return False
+
+    type_a = hist_recent > hist_prior
+    type_b = (macd_recent > macd_prior) or (sig_recent > sig_prior)
+    return type_a or type_b
+
+def check_vixfix(df, macd_line, signal_line, histogram):
+    close   = df['Close']
+    low     = df['Low']
+    open_   = df['Open']
+    close_v = close.values
+    low_v   = low.values
 
     bb_mid   = close.rolling(BB_LENGTH).mean()
     bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
@@ -109,7 +130,6 @@ def check_vixfix(df):
 
     twvf  = trigger_with_vf.values
     wvf_v = wvf_at_trigger.values
-    low_v = low.values
     n     = len(twvf)
 
     recent_idx = None
@@ -122,17 +142,13 @@ def check_vixfix(df):
         return False
 
     recent_low   = low_v[recent_idx]
-    recent_close = float(close.iloc[recent_idx])
+    recent_close = close_v[recent_idx]
     recent_wvf   = wvf_v[recent_idx]
 
     if np.isnan(recent_low) or np.isnan(recent_wvf):
         return False
-
-    # No-break check: none of prior NO_BREAK_BARS candles can have lower low
     if not no_break_before(low_v, recent_idx, NO_BREAK_BARS):
         return False
-
-    # Stop distance check
     if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
         return False
 
@@ -144,7 +160,9 @@ def check_vixfix(df):
         if np.isnan(prior_low) or np.isnan(prior_wvf):
             continue
         if recent_low < prior_low and recent_wvf > prior_wvf:
-            return True
+            if macd_divergence(j, recent_idx, macd_line, signal_line, histogram):
+                return True
+            break
 
     return False
 
@@ -192,7 +210,6 @@ def check_stoch(df):
         return False
     if not any(sd[max(0, n - LOOKBACK):n]):
         return False
-
     return True
 
 def run_scans(tickers):
@@ -218,7 +235,8 @@ def run_scans(tickers):
             except:
                 pass
 
-            vf = check_vixfix(df)
+            macd_line, signal_line, histogram = compute_macd(df['Close'])
+            vf = check_vixfix(df, macd_line, signal_line, histogram)
             st = check_stoch(df)
 
             if vf: vixfix_results.append(ticker)
