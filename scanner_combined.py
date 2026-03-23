@@ -29,13 +29,14 @@ YEAR_HIGH_BARS = 52
 # ── Filters ────────────────────────────────────────────────────────────────────
 MIN_PRICE      = 5.0
 MIN_MARKET_CAP = 1_000_000_000
+MAX_STOP_DIST  = 0.11   # Skip signals where stop is more than 11% below entry
+NO_BREAK_BARS  = 10     # No candle in prior N bars can have lower low than trigger
 
 # ── Email settings ─────────────────────────────────────────────────────────────
 GMAIL_USER     = os.environ.get('GMAIL_USER', '')
 GMAIL_PASSWORD = os.environ.get('GMAIL_PASSWORD', '')
 TO_EMAIL       = 'bkcolby@yahoo.com'
 
-# ── Step 1: Fetch tickers ──────────────────────────────────────────────────────
 def get_all_tickers():
     headers = {'User-Agent': 'Mozilla/5.0'}
     tickers = []
@@ -61,7 +62,15 @@ def get_all_tickers():
     print(f'Total tickers fetched: {len(tickers)}')
     return tickers
 
-# ── Step 2: VixFix scan ────────────────────────────────────────────────────────
+def no_break_before(low_values, idx, n_bars):
+    """Returns True if none of the prior n_bars candles have a lower low than trigger candle"""
+    trigger_low = low_values[idx]
+    start = max(0, idx - n_bars)
+    for j in range(start, idx):
+        if low_values[j] < trigger_low:
+            return False
+    return True
+
 def check_vixfix(df):
     close = df['Close']
     low   = df['Low']
@@ -112,10 +121,19 @@ def check_vixfix(df):
     if recent_idx is None:
         return False
 
-    recent_low = low_v[recent_idx]
-    recent_wvf = wvf_v[recent_idx]
+    recent_low   = low_v[recent_idx]
+    recent_close = float(close.iloc[recent_idx])
+    recent_wvf   = wvf_v[recent_idx]
 
     if np.isnan(recent_low) or np.isnan(recent_wvf):
+        return False
+
+    # No-break check: none of prior NO_BREAK_BARS candles can have lower low
+    if not no_break_before(low_v, recent_idx, NO_BREAK_BARS):
+        return False
+
+    # Stop distance check
+    if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
         return False
 
     for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
@@ -130,7 +148,6 @@ def check_vixfix(df):
 
     return False
 
-# ── Step 3: Stochastic scan ────────────────────────────────────────────────────
 def check_stoch(df):
     close = df['Close']
     high  = df['High']
@@ -178,13 +195,10 @@ def check_stoch(df):
 
     return True
 
-# ── Step 4: Run both scans ─────────────────────────────────────────────────────
 def run_scans(tickers):
     vixfix_results = []
     stoch_results  = []
-    min_bars_vf    = VF_LB + MAX_GAP + 10
-    min_bars_st    = YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK + 10
-    min_bars       = max(min_bars_vf, min_bars_st)
+    min_bars = max(VF_LB + MAX_GAP, YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + 10
 
     print(f'Scanning {len(tickers)} tickers...\n')
 
@@ -195,10 +209,8 @@ def run_scans(tickers):
                 continue
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-
             if float(df['Close'].iloc[-1]) < MIN_PRICE:
                 continue
-
             try:
                 mc = yf.Ticker(ticker).fast_info.market_cap
                 if mc is not None and mc < MIN_MARKET_CAP:
@@ -209,10 +221,8 @@ def run_scans(tickers):
             vf = check_vixfix(df)
             st = check_stoch(df)
 
-            if vf:
-                vixfix_results.append(ticker)
-            if st:
-                stoch_results.append(ticker)
+            if vf: vixfix_results.append(ticker)
+            if st: stoch_results.append(ticker)
 
             if vf or st:
                 tag = []
@@ -230,36 +240,23 @@ def run_scans(tickers):
 
     return sorted(vixfix_results), sorted(stoch_results)
 
-# ── Step 5: Build report ───────────────────────────────────────────────────────
 def build_report(vixfix, stoch):
     both = sorted(set(vixfix) & set(stoch))
     sep  = '=' * 45
-
     lines = [
-        sep,
-        'WEEKLY STOCK SCAN RESULTS',
-        sep,
-        '',
-        'BB + VIXFIX DIVERGENCE',
-        sep,
+        sep, 'WEEKLY STOCK SCAN RESULTS', sep, '',
+        'BB + VIXFIX DIVERGENCE', sep,
         '\n'.join(vixfix) if vixfix else 'No matches.',
-        f'Total: {len(vixfix)}',
-        '',
-        'BB + STOCHASTIC DIVERGENCE',
-        sep,
+        f'Total: {len(vixfix)}', '',
+        'BB + STOCHASTIC DIVERGENCE', sep,
         '\n'.join(stoch) if stoch else 'No matches.',
-        f'Total: {len(stoch)}',
-        '',
-        'APPEARS IN BOTH SCANS',
-        sep,
+        f'Total: {len(stoch)}', '',
+        'APPEARS IN BOTH SCANS', sep,
         '\n'.join(both) if both else 'No tickers in both scans.',
-        f'Total: {len(both)}',
-        sep,
+        f'Total: {len(both)}', sep,
     ]
-
     return '\n'.join(lines)
 
-# ── Step 6: Print and email ────────────────────────────────────────────────────
 def send_email(report):
     msg = MIMEMultipart()
     msg['From']    = GMAIL_USER
@@ -274,15 +271,10 @@ def send_email(report):
     except Exception as e:
         print(f'\nEmail failed: {e}')
 
-# ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    tickers        = get_all_tickers()
-    vixfix, stoch  = run_scans(tickers)
-    report         = build_report(vixfix, stoch)
-
-    # Always print to log
+    tickers       = get_all_tickers()
+    vixfix, stoch = run_scans(tickers)
+    report        = build_report(vixfix, stoch)
     print('\n' + report)
-
-    # Always email
     if GMAIL_USER:
         send_email(report)
