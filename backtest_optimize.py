@@ -17,6 +17,7 @@ VF_MULT        = 2.0
 VF_LB          = 75
 VF_PH          = 0.85
 MAX_GAP        = 35
+MAX_STOP_DIST  = 0.11        # Skip signals where stop is more than 11% below entry
 SCAN_DELAY     = 3
 VF_NEAR        = 2
 STOCH_LOOKBACK = 25
@@ -126,6 +127,11 @@ def find_vixfix_signals(df):
             if np.isnan(prior_low) or np.isnan(prior_wvf):
                 continue
             if recent_low < prior_low and recent_wvf > prior_wvf:
+                # Skip if stop loss is more than MAX_STOP_DIST below entry
+                entry_price = float(df['Close'].iloc[recent_idx])
+                stop_price  = float(low_v[recent_idx])
+                if (entry_price - stop_price) / entry_price > MAX_STOP_DIST:
+                    break
                 signals.append({
                     'signal_idx':  recent_idx,
                     'signal_date': df.index[recent_idx],
