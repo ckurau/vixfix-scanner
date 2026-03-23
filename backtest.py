@@ -25,7 +25,7 @@ LOOKBACK       = 10
 YEAR_HIGH_BARS = 52
 
 # ── Backtest settings ──────────────────────────────────────────────────────────
-HOLD_WEEKS     = 10
+HOLD_WEEKS     = 15
 WIN_TARGET     = 0.13        # 13% gain = win
 POSITION_SIZE  = 5000.0      # $5,000 per trade
 
