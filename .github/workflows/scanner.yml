@@ -2,9 +2,9 @@ name: Weekly Stock Scanners
 
 on:
   schedule:
-    # 2pm PST = 10pm UTC every Friday
-    - cron: '0 22 * * 5'
-  workflow_dispatch:  # manual trigger from GitHub app
+    # 12pm PST = 8pm UTC every Friday
+    - cron: '0 20 * * 5'
+  workflow_dispatch:
 
 jobs:
   combined-scan:
