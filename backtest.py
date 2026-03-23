@@ -24,17 +24,23 @@ STOCH_K        = 14
 LOOKBACK       = 10
 YEAR_HIGH_BARS = 52
 
+# ── MACD settings (matching your TOS chart exactly) ───────────────────────────
+MACD_FAST      = 12
+MACD_SLOW      = 26
+MACD_SIGNAL    = 9
+
 # ── Backtest settings ──────────────────────────────────────────────────────────
-HOLD_WEEKS_SHORT = 15     # Primary hold period
-HOLD_WEEKS_LONG  = 30     # Comparison hold period
-WIN_TARGET       = 0.13   # 13% gain = win
-POSITION_SIZE    = 5000.0 # $5,000 per trade
+HOLD_WEEKS_SHORT = 15
+HOLD_WEEKS_LONG  = 30
+WIN_TARGET       = 0.13
+POSITION_SIZE    = 5000.0
+YEARS_HISTORY    = 15    # Download up to 15 years of weekly data
 
 # ── Filters ────────────────────────────────────────────────────────────────────
 MIN_PRICE      = 5.0
 MIN_MARKET_CAP = 1_000_000_000
-MAX_STOP_DIST  = 0.11     # Skip if stop > 11% below entry
-NO_BREAK_BARS  = 10       # No prior candle in N bars can have lower low
+MAX_STOP_DIST  = 0.11
+NO_BREAK_BARS  = 10
 
 # ── Email ──────────────────────────────────────────────────────────────────────
 GMAIL_USER     = os.environ.get('GMAIL_USER', '')
@@ -66,6 +72,15 @@ def get_all_tickers():
     print(f'Total tickers fetched: {len(tickers)}')
     return tickers
 
+def compute_macd(close):
+    """Compute MACD line, Signal line, and Histogram using EMA"""
+    ema_fast   = close.ewm(span=MACD_FAST,   adjust=False).mean()
+    ema_slow   = close.ewm(span=MACD_SLOW,   adjust=False).mean()
+    macd_line  = ema_fast - ema_slow
+    signal     = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    histogram  = macd_line - signal
+    return macd_line.values, signal.values, histogram.values
+
 def no_break_before(low_values, idx, n_bars):
     trigger_low = low_values[idx]
     start = max(0, idx - n_bars)
@@ -74,10 +89,40 @@ def no_break_before(low_values, idx, n_bars):
             return False
     return True
 
-def find_vixfix_signals(df):
-    close = df['Close']
-    low   = df['Low']
-    open_ = df['Open']
+def macd_divergence(prior_idx, recent_idx, macd_line, signal_line, histogram):
+    """
+    Check MACD divergence between two trigger candles.
+    Price already confirmed lower low (recent < prior).
+    We need: histogram higher OR (macd_line higher OR signal_line higher)
+
+    Type A: histogram at recent > histogram at prior
+            (bars getting less negative = bullish divergence)
+    Type B: macd_line at recent > macd_line at prior
+            OR signal_line at recent > signal_line at prior
+
+    Returns True if either Type A or Type B is satisfied.
+    """
+    hist_prior   = histogram[prior_idx]
+    hist_recent  = histogram[recent_idx]
+    macd_prior   = macd_line[prior_idx]
+    macd_recent  = macd_line[recent_idx]
+    sig_prior    = signal_line[prior_idx]
+    sig_recent   = signal_line[recent_idx]
+
+    if any(np.isnan(v) for v in [hist_prior, hist_recent, macd_prior, macd_recent, sig_prior, sig_recent]):
+        return False
+
+    type_a = hist_recent > hist_prior
+    type_b = (macd_recent > macd_prior) or (sig_recent > sig_prior)
+
+    return type_a or type_b
+
+def find_vixfix_signals(df, macd_line, signal_line, histogram):
+    close   = df['Close']
+    low     = df['Low']
+    open_   = df['Open']
+    close_v = close.values
+    low_v   = low.values
 
     bb_mid   = close.rolling(BB_LENGTH).mean()
     bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
@@ -112,10 +157,12 @@ def find_vixfix_signals(df):
 
     twvf  = trigger_with_vf.values
     wvf_v = wvf_at_trigger.values
-    low_v = low.values
-    close_v = close.values
     n     = len(twvf)
     signals = []
+    skipped_nobreak = 0
+    skipped_stopdist = 0
+    skipped_macd = 0
+    skipped_novixdiv = 0
 
     for recent_idx in range(n):
         if not twvf[recent_idx]:
@@ -127,14 +174,15 @@ def find_vixfix_signals(df):
         if np.isnan(recent_low) or np.isnan(recent_wvf):
             continue
 
-        # No-break: none of prior NO_BREAK_BARS candles can have lower low
         if not no_break_before(low_v, recent_idx, NO_BREAK_BARS):
+            skipped_nobreak += 1
             continue
 
-        # Stop distance filter
         if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
+            skipped_stopdist += 1
             continue
 
+        found = False
         for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
             if not twvf[j]:
                 continue
@@ -143,15 +191,27 @@ def find_vixfix_signals(df):
             if np.isnan(prior_low) or np.isnan(prior_wvf):
                 continue
             if recent_low < prior_low and recent_wvf > prior_wvf:
+                # Check MACD divergence
+                if not macd_divergence(j, recent_idx, macd_line, signal_line, histogram):
+                    skipped_macd += 1
+                    break
                 signals.append({
                     'signal_idx':  recent_idx,
                     'signal_date': df.index[recent_idx],
                     'entry_price': float(recent_close),
                     'stop_loss':   float(recent_low)
                 })
+                found = True
                 break
 
-    return signals
+        if not found and not any(twvf[max(recent_idx - MAX_GAP, 0):recent_idx]):
+            skipped_novixdiv += 1
+
+    return signals, {
+        'skipped_nobreak':  skipped_nobreak,
+        'skipped_stopdist': skipped_stopdist,
+        'skipped_macd':     skipped_macd,
+    }
 
 def find_stoch_signal_bars(df):
     close = df['Close']
@@ -217,25 +277,20 @@ def backtest_signal(df, signal, hold_weeks):
         future_idx = idx + w
         if future_idx >= n:
             break
+        week_high = float(df['High'].iloc[future_idx])
+        week_low  = float(df['Low'].iloc[future_idx])
 
-        week_high  = float(df['High'].iloc[future_idx])
-        week_low   = float(df['Low'].iloc[future_idx])
-
-        # Win: intraday high touched target
         if week_high >= win_target:
             result     = 'WIN'
             exit_price = win_target
             exit_week  = w
             break
-
-        # Loss: intraday low pierced stop
         if week_low <= stop_loss:
             result     = 'LOSS'
             exit_price = stop_loss
             exit_week  = w
             break
 
-    # Neutral: use close at end of hold period
     if result == 'NEUTRAL':
         last_idx   = min(idx + hold_weeks, n - 1)
         exit_price = float(df['Close'].iloc[last_idx])
@@ -258,21 +313,31 @@ def backtest_signal(df, signal, hold_weeks):
 def run_backtest(tickers):
     all_trades_short = []
     all_trades_long  = []
+    total_skipped_nobreak  = 0
+    total_skipped_stopdist = 0
+    total_skipped_macd     = 0
+
+    cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=YEARS_HISTORY)
     min_bars = max(VF_LB + MAX_GAP, YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + HOLD_WEEKS_LONG + 10
 
-    print(f'Backtesting {len(tickers)} tickers...')
+    print(f'Backtesting {len(tickers)} tickers (up to {YEARS_HISTORY} years of weekly data)...')
 
     for i, ticker in enumerate(tickers):
         try:
-            df = yf.download(ticker, period='5y', interval='1wk', progress=False, auto_adjust=True)
+            df = yf.download(ticker, period='max', interval='1wk', progress=False, auto_adjust=True)
             if df is None or len(df) < min_bars:
                 continue
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
+
+            # Trim to last 15 years
+            df = df[df.index >= cutoff_date].copy()
+            if len(df) < min_bars:
+                continue
+
             if float(df['Close'].iloc[-1]) < MIN_PRICE:
                 continue
 
-            # Price sanity check — skip if adjusted prices look wrong (>50% off recent price)
             recent_close = float(df['Close'].iloc[-1])
 
             try:
@@ -282,7 +347,14 @@ def run_backtest(tickers):
             except:
                 pass
 
-            vf_signals = find_vixfix_signals(df)
+            # Compute MACD
+            macd_line, signal_line, histogram = compute_macd(df['Close'])
+
+            vf_signals, skip_counts = find_vixfix_signals(df, macd_line, signal_line, histogram)
+            total_skipped_nobreak  += skip_counts['skipped_nobreak']
+            total_skipped_stopdist += skip_counts['skipped_stopdist']
+            total_skipped_macd     += skip_counts['skipped_macd']
+
             if not vf_signals:
                 continue
 
@@ -301,11 +373,10 @@ def run_backtest(tickers):
                 if sidx + 1 >= len(df):
                     continue
 
-                # Sanity check: entry price should be within 80% of recent price
-                # catches stale/adjusted data issues like STWD
+                # Price sanity check
                 entry = signal['entry_price']
                 if entry < recent_close * 0.15 or entry > recent_close * 6.0:
-                    print(f'  Skipping {ticker} {signal["signal_date"].date()} — price data mismatch (entry ${entry:.2f} vs recent ${recent_close:.2f})')
+                    print(f'  Skipping {ticker} {signal["signal_date"].date()} — price mismatch (${entry:.2f} vs ${recent_close:.2f})')
                     continue
 
                 trade_short = backtest_signal(df, signal, HOLD_WEEKS_SHORT)
@@ -321,7 +392,7 @@ def run_backtest(tickers):
                 print(
                     f'  {ticker} {trade_short["date"]} → '
                     f'{trade_short["result"]:<7} {trade_short["pct_return"]:+.1f}% '
-                    f'(${trade_short["dollar_return"]:+.2f}) wk{trade_short["exit_week"]} | '
+                    f'(${trade_short["dollar_return"]:+.2f}) | '
                     f'30w: {trade_long["result"]:<7} {trade_long["pct_return"]:+.1f}%'
                 )
 
@@ -333,7 +404,17 @@ def run_backtest(tickers):
 
         time.sleep(0.05)
 
+    print(f'\nFilter summary:')
+    print(f'  Skipped (no-break violated):  {total_skipped_nobreak}')
+    print(f'  Skipped (stop too wide >11%): {total_skipped_stopdist}')
+    print(f'  Skipped (no MACD divergence): {total_skipped_macd}')
+
     return all_trades_short, all_trades_long
+
+def safe_mean(values):
+    """Mean that handles empty lists and NaN values"""
+    clean = [v for v in values if v is not None and not np.isnan(v)]
+    return np.mean(clean) if clean else 0.0
 
 def summarize(trades, hold_weeks, label):
     if not trades:
@@ -349,28 +430,29 @@ def summarize(trades, hold_weeks, label):
     hold_times     = [t['exit_week'] for t in trades if t['exit_week'] is not None]
 
     win_rate        = len(wins) / total * 100
-    avg_pct         = np.mean(pct_returns)
-    avg_win_pct     = np.mean([t['pct_return'] for t in wins]) if wins else 0
-    avg_loss_pct    = np.mean([t['pct_return'] for t in losses]) if losses else 0
-    avg_dollar      = np.mean(dollar_returns)
-    avg_win_dollar  = np.mean([t['dollar_return'] for t in wins]) if wins else 0
-    avg_loss_dollar = np.mean([t['dollar_return'] for t in losses]) if losses else 0
-    avg_hold        = np.mean(hold_times) if hold_times else 0
-    avg_hold_win    = np.mean([t['exit_week'] for t in wins]) if wins else 0
-    avg_hold_loss   = np.mean([t['exit_week'] for t in losses]) if losses else 0
+    avg_pct         = safe_mean(pct_returns)
+    avg_win_pct     = safe_mean([t['pct_return'] for t in wins])
+    avg_loss_pct    = safe_mean([t['pct_return'] for t in losses])
+    avg_dollar      = safe_mean(dollar_returns)
+    avg_win_dollar  = safe_mean([t['dollar_return'] for t in wins])
+    avg_loss_dollar = safe_mean([t['dollar_return'] for t in losses])
+    avg_hold        = safe_mean(hold_times)
+    avg_hold_win    = safe_mean([t['exit_week'] for t in wins])
+    avg_hold_loss   = safe_mean([t['exit_week'] for t in losses])
 
     total_capital = total * POSITION_SIZE
-    total_profit  = sum(dollar_returns)
-    total_roi     = total_profit / total_capital * 100
+    total_profit  = sum(v for v in dollar_returns if not np.isnan(v))
+    total_roi     = (total_profit / total_capital * 100) if total_capital > 0 else 0.0
 
-    best_trade  = max(trades, key=lambda t: t['dollar_return'])
-    worst_trade = min(trades, key=lambda t: t['dollar_return'])
+    best_trade  = max(trades, key=lambda t: t['dollar_return'] if not np.isnan(t['dollar_return']) else -999999)
+    worst_trade = min(trades, key=lambda t: t['dollar_return'] if not np.isnan(t['dollar_return']) else 999999)
 
     sep = '=' * 58
     lines = [
         sep,
         f'BACKTEST REPORT — {label}',
-        f'BB + VixFix + Stochastic | $5,000/trade | Max hold: {hold_weeks}w',
+        f'BB + VixFix + Stochastic + MACD Divergence | $5,000/trade',
+        f'Max hold: {hold_weeks} weeks | Last {YEARS_HISTORY} years of data',
         sep,
         f'Total signals:        {total}',
         f'Wins  (>+13%):        {len(wins)} ({win_rate:.1f}%)',
@@ -403,9 +485,11 @@ def summarize(trades, hold_weeks, label):
     ]
 
     for t in sorted(trades, key=lambda x: x['date']):
+        ret_str  = f'{t["pct_return"]:+.1f}%' if not np.isnan(t["pct_return"]) else 'nan'
+        dret_str = f'${t["dollar_return"]:+,.2f}' if not np.isnan(t["dollar_return"]) else 'nan'
         lines.append(
             f'{t["ticker"]:<6} {t["date"]:<12} {t["result"]:<8} '
-            f'{t["pct_return"]:>+6.1f}% {t["dollar_return"]:>+10,.2f} '
+            f'{ret_str:>7} {dret_str:>10} '
             f'{str(t["exit_week"])+"w":>4}  ${t["entry"]:>7.2f}  ${t["stop_loss"]:>7.2f}'
         )
 
@@ -422,7 +506,7 @@ def send_email(report):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
             s.login(GMAIL_USER, GMAIL_PASSWORD)
             s.sendmail(GMAIL_USER, TO_EMAIL, msg.as_string())
-        print(f'Backtest report emailed to {TO_EMAIL}')
+        print(f'Report emailed to {TO_EMAIL}')
     except Exception as e:
         print(f'Email failed: {e}')
 
@@ -433,16 +517,15 @@ if __name__ == '__main__':
     report_short = summarize(trades_short, HOLD_WEEKS_SHORT, f'{HOLD_WEEKS_SHORT}-WEEK HOLD')
     report_long  = summarize(trades_long,  HOLD_WEEKS_LONG,  f'{HOLD_WEEKS_LONG}-WEEK HOLD')
 
-    # Win rate comparison
     sep = '=' * 58
     if trades_short and trades_long:
-        wr_short = len([t for t in trades_short if t['result'] == 'WIN']) / len(trades_short) * 100
-        wr_long  = len([t for t in trades_long  if t['result'] == 'WIN']) / len(trades_long)  * 100
-        pnl_short = sum(t['dollar_return'] for t in trades_short)
-        pnl_long  = sum(t['dollar_return'] for t in trades_long)
+        wr_short  = len([t for t in trades_short if t['result'] == 'WIN']) / len(trades_short) * 100
+        wr_long   = len([t for t in trades_long  if t['result'] == 'WIN']) / len(trades_long)  * 100
+        pnl_short = sum(t['dollar_return'] for t in trades_short if not np.isnan(t['dollar_return']))
+        pnl_long  = sum(t['dollar_return'] for t in trades_long  if not np.isnan(t['dollar_return']))
         comparison = '\n'.join([
             sep,
-            '15-WEEK vs 30-WEEK COMPARISON',
+            '15-WEEK vs 30-WEEK HOLD COMPARISON',
             sep,
             f'{"Metric":<28} {"15 Weeks":>12} {"30 Weeks":>12}',
             '-' * 54,
@@ -456,6 +539,5 @@ if __name__ == '__main__':
 
     full_report = comparison + '\n\n' + report_short + '\n\n' + report_long
     print('\n' + full_report)
-
     if GMAIL_USER:
         send_email(full_report)
