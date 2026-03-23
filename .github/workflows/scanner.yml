@@ -53,3 +53,16 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
         run: python backtest_optimize.py
+
+  debug:
+    runs-on: ubuntu-latest
+    name: Debug Single Ticker
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy requests
+      - name: Run debug
+        run: python debug_ticker.py
