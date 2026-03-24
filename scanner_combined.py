@@ -8,7 +8,6 @@ import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# ── Settings ───────────────────────────────────────────────────────────────────
 BB_LENGTH      = 20
 BB_MULT        = 2.0
 VF_PD          = 30
@@ -83,18 +82,14 @@ def no_break_after(low_values, idx, end_idx):
     return True
 
 def macd_divergence(prior_idx, recent_idx, macd_line, signal_line, histogram):
-    hist_prior  = histogram[prior_idx]
-    hist_recent = histogram[recent_idx]
-    macd_prior  = macd_line[prior_idx]
-    macd_recent = macd_line[recent_idx]
-    sig_prior   = signal_line[prior_idx]
-    sig_recent  = signal_line[recent_idx]
-
-    if any(np.isnan(v) for v in [hist_prior, hist_recent, macd_prior, macd_recent, sig_prior, sig_recent]):
+    vals = [histogram[prior_idx], histogram[recent_idx],
+            macd_line[prior_idx], macd_line[recent_idx],
+            signal_line[prior_idx], signal_line[recent_idx]]
+    if any(np.isnan(v) for v in vals):
         return False
-
-    type_a = hist_recent > hist_prior
-    type_b = (macd_recent > macd_prior) or (sig_recent > sig_prior)
+    type_a = histogram[recent_idx] > histogram[prior_idx]
+    type_b = (macd_line[recent_idx] > macd_line[prior_idx]) or \
+             (signal_line[recent_idx] > signal_line[prior_idx])
     return type_a or type_b
 
 def check_vixfix(df, macd_line, signal_line, histogram):
@@ -103,6 +98,7 @@ def check_vixfix(df, macd_line, signal_line, histogram):
     open_   = df['Open']
     close_v = close.values
     low_v   = low.values
+    n       = len(df)
 
     bb_mid   = close.rolling(BB_LENGTH).mean()
     bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
@@ -137,8 +133,8 @@ def check_vixfix(df, macd_line, signal_line, histogram):
 
     twvf  = trigger_with_vf.values
     wvf_v = wvf_at_trigger.values
-    n     = len(twvf)
 
+    # Find most recent trigger within SCAN_DELAY bars
     recent_idx = None
     for i in range(n - 1, max(n - SCAN_DELAY - 2, -1), -1):
         if twvf[i]:
@@ -154,11 +150,13 @@ def check_vixfix(df, macd_line, signal_line, histogram):
 
     if np.isnan(recent_low) or np.isnan(recent_wvf):
         return False
+    # noBreak before recent trigger
     if not no_break_before(low_v, recent_idx, NO_BREAK_BARS):
         return False
+    # Stop distance
     if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
         return False
-    # Post-trigger noBreak: no candle after trigger broke below trigger low
+    # noBreak after recent trigger
     if not no_break_after(low_v, recent_idx, n - 1):
         return False
 
@@ -168,6 +166,9 @@ def check_vixfix(df, macd_line, signal_line, histogram):
         prior_low = low_v[j]
         prior_wvf = wvf_v[j]
         if np.isnan(prior_low) or np.isnan(prior_wvf):
+            continue
+        # noBreak before FIRST trigger candle too
+        if not no_break_before(low_v, j, NO_BREAK_BARS):
             continue
         if recent_low < prior_low and recent_wvf > prior_wvf:
             if macd_divergence(j, recent_idx, macd_line, signal_line, histogram):
@@ -236,12 +237,14 @@ def run_scans(tickers):
                 continue
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
+
             close_clean = df['Close'].dropna()
             if close_clean.empty:
                 continue
             current_price = float(close_clean.iloc[-1])
             if np.isnan(current_price) or current_price < MIN_PRICE:
                 continue
+
             try:
                 mc = yf.Ticker(ticker).fast_info.market_cap
                 if mc is not None and mc < MIN_MARKET_CAP:
@@ -258,7 +261,7 @@ def run_scans(tickers):
 
             if vf or st:
                 tag = []
-                if vf: tag.append('VixFix')
+                if vf: tag.append('VixFix+MACD')
                 if st: tag.append('Stoch')
                 print(f'  ✓ {ticker} — {" + ".join(tag)}')
 
@@ -272,18 +275,34 @@ def run_scans(tickers):
 
     return sorted(vixfix_results), sorted(stoch_results)
 
-def build_report(vixfix, stoch):
+def build_report(vixfix, stoch, hist_win_rate=None):
     both = sorted(set(vixfix) & set(stoch))
-    sep  = '=' * 45
-    lines = [
+    sep  = '=' * 50
+
+    lines = []
+
+    # High confidence alert at top
+    if hist_win_rate is not None and both:
+        lines += [
+            sep,
+            f'★ HIGH CONFIDENCE SIGNALS ★',
+            f'Strategy A | 20w hold | 13% target | MACD + Stochastic',
+            f'Historical win rate: {hist_win_rate:.1f}% (15 years backtest)',
+            f'The following tickers appear in BOTH scans:',
+        ]
+        for t in both:
+            lines.append(f'  {t}')
+        lines += [sep, '']
+
+    lines += [
         sep, 'WEEKLY STOCK SCAN RESULTS', sep, '',
-        'BB + VIXFIX + MACD + RSI DIVERGENCE', sep,
+        'BB + VIXFIX + MACD DIVERGENCE', sep,
         '\n'.join(vixfix) if vixfix else 'No matches.',
         f'Total: {len(vixfix)}', '',
         'BB + STOCHASTIC DIVERGENCE', sep,
         '\n'.join(stoch) if stoch else 'No matches.',
         f'Total: {len(stoch)}', '',
-        'APPEARS IN BOTH SCANS (BB + VIXFIX + MACD + RSI + STOCHASTIC)', sep,
+        'APPEARS IN BOTH SCANS (Highest confidence)', sep,
         '\n'.join(both) if both else 'No tickers in both scans.',
         f'Total: {len(both)}', sep,
     ]
