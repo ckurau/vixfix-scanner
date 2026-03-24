@@ -277,13 +277,13 @@ def build_report(vixfix, stoch):
     sep  = '=' * 45
     lines = [
         sep, 'WEEKLY STOCK SCAN RESULTS', sep, '',
-        'BB + VIXFIX DIVERGENCE', sep,
+        'BB + VIXFIX + MACD + RSI DIVERGENCE', sep,
         '\n'.join(vixfix) if vixfix else 'No matches.',
         f'Total: {len(vixfix)}', '',
         'BB + STOCHASTIC DIVERGENCE', sep,
         '\n'.join(stoch) if stoch else 'No matches.',
         f'Total: {len(stoch)}', '',
-        'APPEARS IN BOTH SCANS', sep,
+        'APPEARS IN BOTH SCANS (BB + VIXFIX + MACD + RSI + STOCHASTIC)', sep,
         '\n'.join(both) if both else 'No tickers in both scans.',
         f'Total: {len(both)}', sep,
     ]
