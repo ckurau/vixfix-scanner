@@ -236,8 +236,11 @@ def run_scans(tickers):
                 continue
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            current_price = df['Close'].dropna().iloc[-1] if not df['Close'].dropna().empty else float('nan')
-    if np.isnan(current_price) or float(current_price) < MIN_PRICE:
+            close_clean = df['Close'].dropna()
+            if close_clean.empty:
+                continue
+            current_price = float(close_clean.iloc[-1])
+            if np.isnan(current_price) or current_price < MIN_PRICE:
                 continue
             try:
                 mc = yf.Ticker(ticker).fast_info.market_cap
