@@ -284,7 +284,7 @@ def evaluate_signal(signal, weekly_data, win_target_pct):
         'result':        result,
         'pct_return':    pct_return if not np.isnan(pct_return) else 0.0,
         'dollar_return': dollar_return if not np.isnan(dollar_return) else 0.0,
-        'exit_week':     exit_week,
+        'exit_week':     exit_week if exit_week is not None else 0,
         'ticker':        signal.get('ticker', ''),
         'date':          str(signal['signal_date'].date())
     }
@@ -375,8 +375,9 @@ def summarize_optimization(results_by_target):
         sep,
         'EXIT TARGET OPTIMIZATION REPORT',
         'BB + VixFix + MACD + Stochastic | $5,000/trade | 20-week hold',
+        'ExpVal = (Win% x Avg Win%) + (Loss% x Avg Loss%) | ROI = Total P&L / Total Capital',
         sep,
-        f'{"Target":>8}  {"Signals":>8}  {"Win%":>7}  {"TotalP&L":>12}  {"AvgRet":>8}  {"ExpVal":>8}',
+        f'{"Target":>8}  {"Signals":>8}  {"Win%":>7}  {"TotalP&L":>12}  {"AvgRet":>8}  {"ExpVal":>8}  {"ROI":>7}  {"AvgWks":>7}  {"AvgDays":>8}',
         sep2,
     ]
 
@@ -398,6 +399,11 @@ def summarize_optimization(results_by_target):
         avg_loss = safe_mean([t['pct_return'] for t in losses])
         exp_val  = (win_rate/100 * avg_win) + (loss_rate/100 * avg_loss)
 
+        capital    = total * POSITION_SIZE
+        roi        = (total_pnl / capital * 100) if capital > 0 else 0.0
+        avg_weeks  = safe_mean([t['exit_week'] for t in trades if t['exit_week'] is not None])
+        avg_days   = avg_weeks * 7  # weekly candles = 7 days per bar
+
         summary_rows.append({
             'target':    target,
             'total':     total,
@@ -408,11 +414,15 @@ def summarize_optimization(results_by_target):
             'avg_win':   avg_win,
             'avg_loss':  avg_loss,
             'loss_rate': loss_rate,
+            'roi':       roi,
+            'avg_weeks': avg_weeks,
+            'avg_days':  avg_days,
         })
 
         lines.append(
             f'{int(target*100):>7}%  {total:>8}  {win_rate:>6.1f}%  '
-            f'${total_pnl:>+11,.2f}  {avg_ret:>+7.1f}%  {exp_val:>+7.2f}%'
+            f'${total_pnl:>+11,.2f}  {avg_ret:>+7.1f}%  {exp_val:>+7.2f}%  '
+            f'{roi:>+6.1f}%  {avg_weeks:>6.1f}w  {avg_days:>7.0f}d'
         )
 
     lines.append(sep2)
@@ -430,7 +440,8 @@ def summarize_optimization(results_by_target):
             f'Highest win rate:      {int(best_wr["target"]*100)}% target  '
             f'({best_wr["win_rate"]:.1f}%  P&L ${best_wr["total_pnl"]:+,.2f})',
             f'Best expected value:   {int(best_ev["target"]*100)}% target  '
-            f'(EV {best_ev["exp_val"]:+.2f}%  win {best_ev["win_rate"]:.1f}%  P&L ${best_ev["total_pnl"]:+,.2f})',
+            f'(EV {best_ev["exp_val"]:+.2f}%  win {best_ev["win_rate"]:.1f}%  '
+            f'P&L ${best_ev["total_pnl"]:+,.2f}  ROI {best_ev["roi"]:+.1f}%  avg hold {best_ev["avg_weeks"]:.1f}w)',
             '',
             '── Overall recommendation (40% P&L + 35% win rate + 25% EV) ─',
         ]
@@ -449,7 +460,8 @@ def summarize_optimization(results_by_target):
         lines.append(
             f'Overall best exit target: {int(best["target"]*100)}%\n'
             f'  P&L: ${best["total_pnl"]:+,.2f}  Win rate: {best["win_rate"]:.1f}%  '
-            f'Expected value: {best["exp_val"]:+.2f}%'
+            f'EV: {best["exp_val"]:+.2f}%  ROI: {best["roi"]:+.1f}%  '
+            f'Avg hold: {best["avg_weeks"]:.1f}w ({best["avg_days"]:.0f} days)'
         )
 
     lines.append(sep)
