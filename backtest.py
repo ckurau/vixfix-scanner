@@ -30,7 +30,7 @@ RSI_PERIOD     = 14
 RSI_PATH_B_BARS = 3   # bars before second trigger to check for RSI Path B
 
 # ── Backtest settings ──────────────────────────────────────────────────────────
-HOLD_PERIODS   = [15, 20, 30]          # weeks
+HOLD_PERIODS   = [15, 20, 30]          # weeks — 20w is primary
 WIN_TARGETS    = [0.11, 0.12, 0.13]   # 11%, 12%, 13%
 POSITION_SIZE  = 5000.0
 YEARS_HISTORY  = 15
@@ -203,11 +203,6 @@ def find_vixfix_signals(df, macd_line, signal_line, histogram, rsi_values):
         if not no_break_before(low_v, recent_idx, NO_BREAK_BARS):
             continue
         if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
-            continue
-
-        # Post-trigger noBreak: no candle after trigger broke below trigger low
-        # (only check up to last available bar, not into the future)
-        if not no_break_after(low_v, recent_idx, n_total - 1):
             continue
 
         for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
@@ -508,10 +503,10 @@ def build_report(results):
     sep2 = '-' * 65
     lines = [sep, 'BACKTEST REPORT — FULL COMPARISON', sep, '']
 
-    # Section 1: Strategy A vs B comparison (13% target, 15w hold)
-    lines.append('── STRATEGY A vs B (13% target, 15-week hold) ─────────────')
-    lines.append(summarize_bucket(results[('A', 15, 0.13, 'all')], 'Strategy A — buy at trigger close'))
-    lines.append(summarize_bucket(results[('B', 15, 0.13, 'all')], 'Strategy B — buy on pullback to trigger close'))
+    # Section 1: Strategy A vs B comparison (13% target, 20w hold)
+    lines.append('── STRATEGY A vs B (13% target, 20-week hold) ─────────────')
+    lines.append(summarize_bucket(results[('A', 20, 0.13, 'all')], 'Strategy A — buy at trigger close'))
+    lines.append(summarize_bucket(results[('B', 20, 0.13, 'all')], 'Strategy B — buy on pullback to trigger close'))
 
     # Section 2: Hold period comparison (Strategy A, 13% target)
     lines.append(sep2)
@@ -519,17 +514,17 @@ def build_report(results):
     for hold in HOLD_PERIODS:
         lines.append(summarize_bucket(results[('A', hold, 0.13, 'all')], f'  {hold}-week hold'))
 
-    # Section 3: Win target comparison (Strategy A, 15w hold)
+    # Section 3: Win target comparison (Strategy A, 20w hold)
     lines.append(sep2)
-    lines.append('── WIN TARGET COMPARISON — Strategy A, 15-week hold ────────')
+    lines.append('── WIN TARGET COMPARISON — Strategy A, 20-week hold ────────')
     for target in WIN_TARGETS:
-        lines.append(summarize_bucket(results[('A', 15, target, 'all')], f'  {int(target*100)}% target'))
+        lines.append(summarize_bucket(results[('A', 20, target, 'all')], f'  {int(target*100)}% target'))
 
-    # Section 4: RSI filter impact (Strategy A, 13% target, 15w hold)
+    # Section 4: RSI filter impact (Strategy A, 13% target, 20w hold)
     lines.append(sep2)
-    lines.append('── RSI DIVERGENCE FILTER IMPACT — Strategy A, 13%, 15w ─────')
-    lines.append(summarize_bucket(results[('A', 15, 0.13, 'all')],  '  Without RSI filter (all signals)'))
-    lines.append(summarize_bucket(results[('A', 15, 0.13, 'rsi')],  '  With RSI filter (divergence required)'))
+    lines.append('── RSI DIVERGENCE FILTER IMPACT — Strategy A, 13%, 20w ─────')
+    lines.append(summarize_bucket(results[('A', 20, 0.13, 'all')],  '  Without RSI filter (all signals)'))
+    lines.append(summarize_bucket(results[('A', 20, 0.13, 'rsi')],  '  With RSI filter (divergence required)'))
 
     # Section 5: Best overall combinations (by expected value)
     lines.append(sep2)
@@ -559,6 +554,26 @@ def build_report(results):
             f'  Strategy {strategy} | {hold}w | {int(target*100)}% | {rsi_label}\n'
             f'    EV: {ev:+.2f}%  Win: {wr:.1f}%  P&L: ${pnl:+,.2f}  Signals: {total}\n'
         )
+
+    # Section 6: Full trade history (Strategy A, 20w, 13%)
+    lines.append(sep2)
+    lines.append('── FULL TRADE HISTORY — Strategy A, 20w, 13% target ────────')
+    hist_trades = results[('A', 20, 0.13, 'all')]
+    if hist_trades:
+        lines.append(
+            f'{"Ticker":<6} {"Date":<12} {"Result":<8} {"Ret%":>7} '
+            f'{"$Ret":>10} {"Wk":>4} {"Entry":>8} {"Stop":>8} {"RSI":>6}'
+        )
+        lines.append('-' * 65)
+        for t in sorted(hist_trades, key=lambda x: x['date']):
+            rsi_tag = t.get('rsi_path', '-') or '-'
+            ret_str = f'{t["pct_return"]:+.1f}%' if not np.isnan(t["pct_return"]) else 'nan'
+            dret    = f'${t["dollar_return"]:+,.2f}' if not np.isnan(t["dollar_return"]) else 'nan'
+            lines.append(
+                f'{t["ticker"]:<6} {t["date"]:<12} {t["result"]:<8} '
+                f'{ret_str:>7} {dret:>10} '
+                f'{str(t["exit_week"])+"w":>4}  ${t["entry"]:>7.2f}  ${t["stop_loss"]:>7.2f}  {rsi_tag:>6}'
+            )
 
     lines.append(sep)
     return '\n'.join(lines)
