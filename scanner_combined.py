@@ -26,7 +26,7 @@ YEAR_HIGH_BARS = 52
 MACD_FAST      = 12
 MACD_SLOW      = 26
 MACD_SIGNAL    = 9
-MIN_PRICE      = 5.0
+MIN_PRICE      = 10.0
 MIN_MARKET_CAP = 1_000_000_000
 MAX_STOP_DIST  = 0.11
 NO_BREAK_BARS  = 10
@@ -71,6 +71,13 @@ def compute_macd(close):
 def no_break_before(low_values, idx, n_bars):
     trigger_low = low_values[idx]
     for j in range(max(0, idx - n_bars), idx):
+        if low_values[j] < trigger_low:
+            return False
+    return True
+
+def no_break_after(low_values, idx, end_idx):
+    trigger_low = low_values[idx]
+    for j in range(idx + 1, end_idx + 1):
         if low_values[j] < trigger_low:
             return False
     return True
@@ -151,6 +158,9 @@ def check_vixfix(df, macd_line, signal_line, histogram):
         return False
     if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
         return False
+    # Post-trigger noBreak: no candle after trigger broke below trigger low
+    if not no_break_after(low_v, recent_idx, n - 1):
+        return False
 
     for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
         if not twvf[j]:
@@ -226,7 +236,8 @@ def run_scans(tickers):
                 continue
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            if float(df['Close'].iloc[-1]) < MIN_PRICE:
+            current_price = df['Close'].dropna().iloc[-1] if not df['Close'].dropna().empty else float('nan')
+    if np.isnan(current_price) or float(current_price) < MIN_PRICE:
                 continue
             try:
                 mc = yf.Ticker(ticker).fast_info.market_cap
