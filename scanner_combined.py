@@ -1,609 +1,482 @@
-import requests
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import smtplib
-import time
-import os
+"""
+scanner_combined.py  —  Weekly scanner (interval=1wk)
+Runs inline mini-backtest at startup to auto-populate win rates,
+signal counts, signals/month, and best EV target per tier.
+Sends HTML email with bold tier headers and red ticker symbols.
+"""
+import requests, pandas as pd, numpy as np, yfinance as yf
+import smtplib, time, os, random
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-BB_LENGTH      = 20
-BB_MULT        = 2.0
-VF_PD          = 30
-VF_BBL         = 20
-VF_MULT        = 2.0
-VF_LB          = 75
-VF_PH          = 0.85
-MAX_GAP        = 35
-SCAN_DELAY     = 5
-VF_NEAR        = 2
-STOCH_LOOKBACK = 25
-STOCH_K        = 14
-LOOKBACK       = 10
-YEAR_HIGH_BARS = 52
-MACD_FAST      = 12
-MACD_SLOW      = 26
-MACD_SIGNAL    = 9
-MIN_PRICE      = 10.0
-MIN_MARKET_CAP = 1_000_000_000
-MAX_STOP_DIST  = 0.11
-NO_BREAK_BARS  = 10
+INTERVAL='1wk'
+BB_LENGTH=20; BB_MULT=2.0; VF_PD=30; VF_BBL=20; VF_MULT=2.0; VF_LB=75; VF_PH=0.85
+MAX_GAP=35; SCAN_DELAY=5; VF_NEAR=2; STOCH_LOOKBACK=25; STOCH_K=14; LOOKBACK=10
+YEAR_HIGH_BARS=52; MACD_FAST=12; MACD_SLOW=26; MACD_SIGNAL=9
+MIN_PRICE=10.0; MIN_MARKET_CAP=1_000_000_000; MAX_STOP_DIST=0.11; NO_BREAK_BARS=10
+HOLD_BARS=20; WIN_TARGET=0.13; POSITION_HIGH=10000.0; POSITION_STD=5000.0; YEARS_HISTORY=15
+EV_TARGETS=[i/100 for i in range(5,55,5)]; BACKTEST_SAMPLE=400
+GMAIL_USER=os.environ.get('GMAIL_USER',''); GMAIL_PASSWORD=os.environ.get('GMAIL_PASSWORD','')
+TO_EMAIL='bkcolby@yahoo.com'
 
-GMAIL_USER     = os.environ.get('GMAIL_USER', '')
-GMAIL_PASSWORD = os.environ.get('GMAIL_PASSWORD', '')
-TO_EMAIL       = 'bkcolby@yahoo.com'
+def safe_mean(v):
+    c=[x for x in v if x is not None and not np.isnan(x)]; return np.mean(c) if c else 0.0
+def safe_sum(v):
+    c=[x for x in v if x is not None and not np.isnan(x)]; return sum(c) if c else 0.0
 
 def get_all_tickers():
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    tickers = []
-    for exchange in ['NYSE', 'NASDAQ']:
-        url = f'https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&exchange={exchange}'
+    headers={'User-Agent':'Mozilla/5.0'}; tickers=[]
+    for exchange in ['NYSE','NASDAQ']:
+        url=f'https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&exchange={exchange}'
         try:
-            r = requests.get(url, headers=headers, timeout=15)
-            data = r.json()
-            rows = data['data']['table']['rows']
+            r=requests.get(url,headers=headers,timeout=15); rows=r.json()['data']['table']['rows']
             for row in rows:
-                sym = row['symbol'].strip()
-                if sym.isalpha() and len(sym) <= 4:
+                sym=row['symbol'].strip()
+                if sym.isalpha() and len(sym)<=4:
                     try:
-                        mc = float(str(row.get('marketCap', '0')).replace(',', ''))
-                        if mc > 0 and mc < MIN_MARKET_CAP:
-                            continue
-                    except:
-                        pass
+                        mc=float(str(row.get('marketCap','0')).replace(',',''))
+                        if mc>0 and mc<MIN_MARKET_CAP: continue
+                    except: pass
                     tickers.append(sym)
-        except Exception as e:
-            print(f'Error fetching {exchange}: {e}')
-    tickers = list(set(tickers))
-    print(f'Total tickers fetched: {len(tickers)}')
-    return tickers
+        except Exception as e: print(f'Error {exchange}: {e}')
+    tickers=list(set(tickers)); print(f'Total tickers: {len(tickers)}'); return tickers
 
 def compute_macd(close):
-    ema_fast  = close.ewm(span=MACD_FAST,   adjust=False).mean()
-    ema_slow  = close.ewm(span=MACD_SLOW,   adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal    = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
-    histogram = macd_line - signal
-    return macd_line.values, signal.values, histogram.values
+    ef=close.ewm(span=MACD_FAST,adjust=False).mean(); es=close.ewm(span=MACD_SLOW,adjust=False).mean()
+    ml=ef-es; sl=ml.ewm(span=MACD_SIGNAL,adjust=False).mean(); return ml.values,sl.values,(ml-sl).values
 
-def no_break_before(low_values, idx, n_bars):
-    trigger_low = low_values[idx]
-    for j in range(max(0, idx - n_bars), idx):
-        if low_values[j] < trigger_low:
-            return False
+def no_break_before(lv,idx,n):
+    tl=lv[idx]
+    for j in range(max(0,idx-n),idx):
+        if lv[j]<tl: return False
     return True
 
-def no_break_after(low_values, idx, end_idx):
-    trigger_low = low_values[idx]
-    for j in range(idx + 1, end_idx + 1):
-        if low_values[j] < trigger_low:
-            return False
+def no_break_after(lv,idx,end):
+    tl=lv[idx]
+    for j in range(idx+1,end+1):
+        if lv[j]<tl: return False
     return True
 
-def macd_divergence(prior_idx, recent_idx, macd_line, signal_line, histogram):
-    vals = [histogram[prior_idx], histogram[recent_idx],
-            macd_line[prior_idx], macd_line[recent_idx],
-            signal_line[prior_idx], signal_line[recent_idx]]
-    if any(np.isnan(v) for v in vals):
-        return False
-    type_a = histogram[recent_idx] > histogram[prior_idx]
-    type_b = (macd_line[recent_idx] > macd_line[prior_idx]) or \
-             (signal_line[recent_idx] > signal_line[prior_idx])
-    return type_a or type_b
+def macd_divergence(pi,ri,ml,sl,hist):
+    vals=[hist[pi],hist[ri],ml[pi],ml[ri],sl[pi],sl[ri]]
+    if any(np.isnan(v) for v in vals): return False
+    return (hist[ri]>hist[pi]) or (ml[ri]>ml[pi]) or (sl[ri]>sl[pi])
 
-# ── VixFix scan: returns (has_macd_div, has_vixfix_div) ──────────────────────
-def check_vixfix(df, macd_line, signal_line, histogram):
-    """
-    Looks for two VixFix-confirmed BB trigger candles forming a divergence:
-      recent price low < prior price low (lower low in price)
-      recent WVF > prior WVF (higher WVF = stronger fear spike)
-    Returns (has_macd_divergence, has_vixfix_divergence).
-    """
-    close   = df['Close']
-    low     = df['Low']
-    open_   = df['Open']
-    close_v = close.values
-    low_v   = low.values
-    n       = len(df)
-
-    bb_mid   = close.rolling(BB_LENGTH).mean()
-    bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
-    bb_lower = bb_mid - BB_MULT * bb_std
-    trigger  = (close > open_) & (low <= bb_lower)
-
-    next_green       = (close.shift(-1) > open_.shift(-1))
-    next_open_above  = (open_.shift(-1) >= open_)
-    next_close_above = (close.shift(-1) >= open_)
-    trigger_confirmed = trigger & next_green & next_open_above & next_close_above
-
-    hc       = close.rolling(VF_PD).max()
-    wvf      = (hc - low) / hc * 100
-    vf_mid   = wvf.rolling(VF_BBL).mean()
-    vf_std   = wvf.rolling(VF_BBL).std(ddof=0)
-    vf_upper = vf_mid + VF_MULT * vf_std
-    vf_range = wvf.rolling(VF_LB).max() * VF_PH
-    is_green = (wvf >= vf_upper) | (wvf >= vf_range)
-
-    vf_near = pd.Series(False, index=df.index)
-    for s in range(VF_NEAR + 1):
-        vf_near = vf_near | is_green.shift(s).fillna(False).infer_objects(copy=False).astype(bool)
-        if s > 0:
-            vf_near = vf_near | is_green.shift(-s).fillna(False).infer_objects(copy=False).astype(bool)
-
-    trigger_with_vf = trigger_confirmed & vf_near
-
-    wvf_at_trigger = pd.Series(np.nan, index=df.index)
-    for s in range(-VF_NEAR, VF_NEAR + 1):
-        shifted = wvf.shift(s).fillna(0)
-        wvf_at_trigger = wvf_at_trigger.combine(shifted, lambda a, b: b if np.isnan(a) else max(a, b))
-
-    twvf  = trigger_with_vf.values
-    wvf_v = wvf_at_trigger.values
-
-    recent_idx = None
-    for i in range(n - 1, max(n - SCAN_DELAY - 2, -1), -1):
-        if twvf[i]:
-            recent_idx = i
-            break
-
-    if recent_idx is None:
-        return False, False
-
-    recent_low   = low_v[recent_idx]
-    recent_close = close_v[recent_idx]
-    recent_wvf   = wvf_v[recent_idx]
-
-    if np.isnan(recent_low) or np.isnan(recent_wvf):
-        return False, False
-    if not no_break_before(low_v, recent_idx, NO_BREAK_BARS):
-        return False, False
-    if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
-        return False, False
-    if not no_break_after(low_v, recent_idx, n - 1):
-        return False, False
-
-    for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
-        if not twvf[j]:
-            continue
-        prior_low = low_v[j]
-        prior_wvf = wvf_v[j]
-        if np.isnan(prior_low) or np.isnan(prior_wvf):
-            continue
-        if not no_break_before(low_v, j, NO_BREAK_BARS):
-            continue
-        if recent_low < prior_low and recent_wvf > prior_wvf:
-            has_macd = macd_divergence(j, recent_idx, macd_line, signal_line, histogram)
-            return has_macd, True
+def check_vixfix(df,ml,sl,hist):
+    close,low,open_=df['Close'],df['Low'],df['Open']; cv,lv=close.values,low.values; n=len(df)
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    tc=(trig&(close.shift(-1)>open_.shift(-1))&(open_.shift(-1)>=open_)&(close.shift(-1)>=open_))
+    hc=close.rolling(VF_PD).max(); wvf=(hc-low)/hc*100
+    vf_up=wvf.rolling(VF_BBL).mean()+VF_MULT*wvf.rolling(VF_BBL).std(ddof=0)
+    vf_rng=wvf.rolling(VF_LB).max()*VF_PH; is_grn=(wvf>=vf_up)|(wvf>=vf_rng)
+    vf_near=pd.Series(False,index=df.index)
+    for s in range(VF_NEAR+1):
+        vf_near|=is_grn.shift(s).fillna(False).infer_objects(copy=False).astype(bool)
+        if s>0: vf_near|=is_grn.shift(-s).fillna(False).infer_objects(copy=False).astype(bool)
+    twvf_s=tc&vf_near; wat=pd.Series(np.nan,index=df.index)
+    for s in range(-VF_NEAR,VF_NEAR+1):
+        sh=wvf.shift(s).fillna(0); wat=wat.combine(sh,lambda a,b: b if np.isnan(a) else max(a,b))
+    twvf,wvfv=twvf_s.values,wat.values
+    recent_idx=None
+    for i in range(n-1,max(n-SCAN_DELAY-2,-1),-1):
+        if twvf[i]: recent_idx=i; break
+    if recent_idx is None: return False,False
+    rl,rc,rw=lv[recent_idx],cv[recent_idx],wvfv[recent_idx]
+    if np.isnan(rl) or np.isnan(rw): return False,False
+    if not no_break_before(lv,recent_idx,NO_BREAK_BARS): return False,False
+    if (rc-rl)/rc>MAX_STOP_DIST: return False,False
+    if not no_break_after(lv,recent_idx,n-1): return False,False
+    for j in range(recent_idx-1,max(recent_idx-MAX_GAP,0)-1,-1):
+        if not twvf[j]: continue
+        pl,pw=lv[j],wvfv[j]
+        if np.isnan(pl) or np.isnan(pw): continue
+        if not no_break_before(lv,j,NO_BREAK_BARS): continue
+        if rl<pl and rw>pw: return macd_divergence(j,recent_idx,ml,sl,hist),True
         break
+    return False,False
 
-    return False, False
-
-# ── Stochastic scan ────────────────────────────────────────────────────────────
 def check_stoch(df):
-    """
-    BB trigger candle fires (green, low ≤ BB lower), confirmed by next candle.
-    Stochastic divergence (price lower low + stoch higher low) within prior
-    10 bars. No-break rule applied. Below 85% of 52-week high.
-    """
-    close = df['Close']
-    high  = df['High']
-    low   = df['Low']
-    open_ = df['Open']
-
-    bb_mid   = close.rolling(BB_LENGTH).mean()
-    bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
-    bb_lower = bb_mid - BB_MULT * bb_std
-    trigger  = (close > open_) & (low <= bb_lower)
-
-    valid_pair = (
-        trigger.shift(1).fillna(False) &
-        (close > open_) &
-        (open_ >= open_.shift(1)) &
-        (close >= open_.shift(1))
-    )
-
-    lowest_low   = low.rolling(STOCH_K).min()
-    highest_high = high.rolling(STOCH_K).max()
-    stoch_k      = 100 * (close - lowest_low) / (highest_high - lowest_low)
-    price_low    = low < low.shift(1).rolling(STOCH_LOOKBACK).min()
-    stoch_high   = stoch_k > stoch_k.shift(1).rolling(STOCH_LOOKBACK).min()
-    stoch_div    = price_low & stoch_high
-
-    trigger_low      = low.where(trigger).ffill()
-    no_break         = low.rolling(LOOKBACK).min() >= trigger_low
-    year_high        = high.rolling(YEAR_HIGH_BARS).max()
-    below_high_limit = close <= 0.85 * year_high
-
-    vp  = valid_pair.values
-    sd  = stoch_div.values
-    nb  = no_break.values
-    bhl = below_high_limit.values
-    n   = len(vp)
-
-    if n < LOOKBACK + 1:
-        return False
-    if not nb[-1] or not bhl[-1]:
-        return False
-    if not any(vp[max(0, n - LOOKBACK):n]):
-        return False
-    if not any(sd[max(0, n - LOOKBACK):n]):
-        return False
+    close,high,low,open_=df['Close'],df['High'],df['Low'],df['Open']
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    vp=(trig.shift(1).fillna(False)&(close>open_)&(open_>=open_.shift(1))&(close>=open_.shift(1)))
+    ll=low.rolling(STOCH_K).min(); hh=high.rolling(STOCH_K).max(); sk=100*(close-ll)/(hh-ll)
+    sd=((low<low.shift(1).rolling(STOCH_LOOKBACK).min())&(sk>sk.shift(1).rolling(STOCH_LOOKBACK).min()))
+    tlo=low.where(trig).ffill(); nb=low.rolling(LOOKBACK).min()>=tlo
+    bhl=close<=0.85*high.rolling(YEAR_HIGH_BARS).max()
+    vpv,sdv,nbv,bhlv=vp.values,sd.values,nb.values,bhl.values; n=len(vpv)
+    if n<LOOKBACK+1: return False
+    if not nbv[-1] or not bhlv[-1]: return False
+    if not any(vpv[max(0,n-LOOKBACK):n]): return False
+    if not any(sdv[max(0,n-LOOKBACK):n]): return False
     return True
 
-# ── BB-only scan ───────────────────────────────────────────────────────────────
 def check_bb_only(df):
-    """
-    BB trigger candle fires (green, low ≤ BB lower) and is confirmed by the
-    next candle. No Stochastic, VixFix, or MACD required. No-break rule applied.
-    """
-    close = df['Close']
-    low   = df['Low']
-    open_ = df['Open']
-
-    bb_mid   = close.rolling(BB_LENGTH).mean()
-    bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
-    bb_lower = bb_mid - BB_MULT * bb_std
-    trigger  = (close > open_) & (low <= bb_lower)
-
-    next_green       = (close.shift(-1) > open_.shift(-1))
-    next_open_above  = (open_.shift(-1) >= open_)
-    next_close_above = (close.shift(-1) >= open_)
-    trigger_confirmed = trigger & next_green & next_open_above & next_close_above
-
-    trigger_low = low.where(trigger).ffill()
-    no_break    = low.rolling(LOOKBACK).min() >= trigger_low
-
-    tc = trigger_confirmed.values
-    nb = no_break.values
-    n  = len(tc)
-
-    if n < LOOKBACK + 1:
-        return False
-    # Check if the most recent bar (or within SCAN_DELAY) had a confirmed trigger
-    for i in range(n - 1, max(n - SCAN_DELAY - 2, -1), -1):
-        if tc[i] and nb[i]:
-            cl = df['Close'].values[i]
-            lw = df['Low'].values[i]
+    close,low,open_=df['Close'],df['Low'],df['Open']
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    tc=(trig&(close.shift(-1)>open_.shift(-1))&(open_.shift(-1)>=open_)&(close.shift(-1)>=open_))
+    tlo=low.where(trig).ffill(); nb=low.rolling(LOOKBACK).min()>=tlo
+    tcv,nbv=tc.values,nb.values; n=len(tcv)
+    for i in range(n-1,max(n-SCAN_DELAY-2,-1),-1):
+        if tcv[i] and nbv[i]:
+            cl,lw=float(df['Close'].values[i]),float(df['Low'].values[i])
             if not np.isnan(cl) and not np.isnan(lw):
-                if (cl - lw) / cl <= MAX_STOP_DIST:
-                    return True
+                if (cl-lw)/cl<=MAX_STOP_DIST: return True
     return False
 
-# ── Stochastic + MACD scan ────────────────────────────────────────────────────
-def check_stoch_macd(df, macd_line, signal_line, histogram):
-    """
-    BB trigger candle fires and is confirmed. Stochastic divergence active
-    within prior 10 bars. MACD histogram or line/signal higher now vs 10
-    bars ago. No VixFix required.
-    """
-    close = df['Close']
-    high  = df['High']
-    low   = df['Low']
-    open_ = df['Open']
+def check_stoch_macd(df,ml,sl,hist):
+    close,high,low,open_=df['Close'],df['High'],df['Low'],df['Open']
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    vp=(trig.shift(1).fillna(False)&(close>open_)&(open_>=open_.shift(1))&(close>=open_.shift(1)))
+    ll=low.rolling(STOCH_K).min(); hh=high.rolling(STOCH_K).max(); sk=100*(close-ll)/(hh-ll)
+    sd=((low<low.shift(1).rolling(STOCH_LOOKBACK).min())&(sk>sk.shift(1).rolling(STOCH_LOOKBACK).min()))
+    tlo=low.where(trig).ffill(); nb=low.rolling(LOOKBACK).min()>=tlo
+    bhl=close<=0.85*high.rolling(YEAR_HIGH_BARS).max()
+    vpv,sdv,nbv,bhlv=vp.values,sd.values,nb.values,bhl.values; n=len(vpv)
+    if n<LOOKBACK+2: return False
+    if not nbv[-1] or not bhlv[-1]: return False
+    if not any(vpv[max(0,n-LOOKBACK):n]): return False
+    if not any(sdv[max(0,n-LOOKBACK):n]): return False
+    i,pi=n-1,max(0,n-1-LOOKBACK)
+    if np.isnan(hist[i]) or np.isnan(hist[pi]): return False
+    return (hist[i]>hist[pi]) or (ml[i]>ml[pi]) or (sl[i]>sl[pi])
 
-    bb_mid   = close.rolling(BB_LENGTH).mean()
-    bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
-    bb_lower = bb_mid - BB_MULT * bb_std
-    trigger  = (close > open_) & (low <= bb_lower)
+# ── Inline backtest signal finders ────────────────────────────────────────────
+def _vixfix_bt(df):
+    close,low,open_=df['Close'],df['Low'],df['Open']; cv,lv=close.values,low.values; n=len(df)
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    tc=(trig&(close.shift(-1)>open_.shift(-1))&(open_.shift(-1)>=open_)&(close.shift(-1)>=open_))
+    hc=close.rolling(VF_PD).max(); wvf=(hc-low)/hc*100
+    vf_up=wvf.rolling(VF_BBL).mean()+VF_MULT*wvf.rolling(VF_BBL).std(ddof=0)
+    vf_rng=wvf.rolling(VF_LB).max()*VF_PH; is_grn=(wvf>=vf_up)|(wvf>=vf_rng)
+    vf_near=pd.Series(False,index=df.index)
+    for s in range(VF_NEAR+1):
+        vf_near|=is_grn.shift(s).fillna(False).infer_objects(copy=False).astype(bool)
+        if s>0: vf_near|=is_grn.shift(-s).fillna(False).infer_objects(copy=False).astype(bool)
+    twvf_s=tc&vf_near; wat=pd.Series(np.nan,index=df.index)
+    for s in range(-VF_NEAR,VF_NEAR+1):
+        sh=wvf.shift(s).fillna(0); wat=wat.combine(sh,lambda a,b: b if np.isnan(a) else max(a,b))
+    twvf,wvfv=twvf_s.values,wat.values; ml,sl,hist=compute_macd(close); pairs=[]
+    for ri in range(n):
+        if not twvf[ri]: continue
+        rl,rc,rw=lv[ri],cv[ri],wvfv[ri]
+        if np.isnan(rl) or np.isnan(rw): continue
+        if not no_break_before(lv,ri,NO_BREAK_BARS): continue
+        if (rc-rl)/rc>MAX_STOP_DIST: continue
+        if not no_break_after(lv,ri,n-1): continue
+        for j in range(ri-1,max(ri-MAX_GAP,0)-1,-1):
+            if not twvf[j]: continue
+            pl,pw=lv[j],wvfv[j]
+            if np.isnan(pl) or np.isnan(pw): continue
+            if not no_break_before(lv,j,NO_BREAK_BARS): continue
+            if rl<pl and rw>pw:
+                pairs.append({'signal_idx':ri,'signal_date':df.index[ri],
+                               'entry_price':float(rc),'stop_loss':float(rl),
+                               'has_macd':macd_divergence(j,ri,ml,sl,hist)}); break
+    return pairs
 
-    valid_pair = (
-        trigger.shift(1).fillna(False) &
-        (close > open_) &
-        (open_ >= open_.shift(1)) &
-        (close >= open_.shift(1))
-    )
+def _stoch_active_bt(df):
+    close,high,low,open_=df['Close'],df['High'],df['Low'],df['Open']
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    vp=(trig.shift(1).fillna(False)&(close>open_)&(open_>=open_.shift(1))&(close>=open_.shift(1)))
+    ll=low.rolling(STOCH_K).min(); hh=high.rolling(STOCH_K).max(); sk=100*(close-ll)/(hh-ll)
+    sd=((low<low.shift(1).rolling(STOCH_LOOKBACK).min())&(sk>sk.shift(1).rolling(STOCH_LOOKBACK).min()))
+    tlo=low.where(trig).ffill(); nb=low.rolling(LOOKBACK).min()>=tlo
+    bhl=close<=0.85*high.rolling(YEAR_HIGH_BARS).max()
+    vpv,sdv,nbv,bhlv=vp.values,sd.values,nb.values,bhl.values; active=set()
+    for i in range(LOOKBACK,len(vpv)):
+        if not nbv[i] or not bhlv[i]: continue
+        if not any(vpv[max(0,i-LOOKBACK):i]): continue
+        if not any(sdv[max(0,i-LOOKBACK):i]): continue
+        active.add(i)
+    return active
 
-    lowest_low   = low.rolling(STOCH_K).min()
-    highest_high = high.rolling(STOCH_K).max()
-    stoch_k      = 100 * (close - lowest_low) / (highest_high - lowest_low)
-    price_low    = low < low.shift(1).rolling(STOCH_LOOKBACK).min()
-    stoch_high   = stoch_k > stoch_k.shift(1).rolling(STOCH_LOOKBACK).min()
-    stoch_div    = price_low & stoch_high
+def _stoch_bt(df):
+    close,high,low,open_=df['Close'],df['High'],df['Low'],df['Open']; cv,lv=close.values,low.values; n=len(df)
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    vp=(trig.shift(1).fillna(False)&(close>open_)&(open_>=open_.shift(1))&(close>=open_.shift(1)))
+    ll=low.rolling(STOCH_K).min(); hh=high.rolling(STOCH_K).max(); sk=100*(close-ll)/(hh-ll)
+    sd=((low<low.shift(1).rolling(STOCH_LOOKBACK).min())&(sk>sk.shift(1).rolling(STOCH_LOOKBACK).min()))
+    tlo=low.where(trig).ffill(); nb=low.rolling(LOOKBACK).min()>=tlo
+    bhl=close<=0.85*high.rolling(YEAR_HIGH_BARS).max()
+    vpv,sdv,nbv,bhlv,tv=vp.values,sd.values,nb.values,bhl.values,trig.values; sigs=[]
+    for i in range(LOOKBACK,n-1):
+        if not nbv[i] or not bhlv[i]: continue
+        if not any(vpv[max(0,i-LOOKBACK):i]): continue
+        if not any(sdv[max(0,i-LOOKBACK):i]): continue
+        ti=next((k for k in range(i,max(i-LOOKBACK,-1),-1) if tv[k]),None)
+        if ti is None: continue
+        e,s=cv[ti],lv[ti]
+        if np.isnan(e) or np.isnan(s): continue
+        if (e-s)/e>MAX_STOP_DIST: continue
+        if sigs and sigs[-1]['signal_idx']==ti: continue
+        sigs.append({'signal_idx':ti,'signal_date':df.index[ti],'entry_price':float(e),'stop_loss':float(s)})
+    return sigs
 
-    trigger_low      = low.where(trigger).ffill()
-    no_break         = low.rolling(LOOKBACK).min() >= trigger_low
-    year_high        = high.rolling(YEAR_HIGH_BARS).max()
-    below_high_limit = close <= 0.85 * year_high
+def _bb_only_bt(df):
+    close,low,open_=df['Close'],df['Low'],df['Open']; cv,lv=close.values,low.values; n=len(df)
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    tc=(trig&(close.shift(-1)>open_.shift(-1))&(open_.shift(-1)>=open_)&(close.shift(-1)>=open_))
+    tlo=low.where(trig).ffill(); nb=low.rolling(LOOKBACK).min()>=tlo; tcv,nbv=tc.values,nb.values; sigs=[]
+    for i in range(LOOKBACK,n-1):
+        if not tcv[i] or not nbv[i]: continue
+        e,s=cv[i],lv[i]
+        if np.isnan(e) or np.isnan(s): continue
+        if (e-s)/e>MAX_STOP_DIST: continue
+        sigs.append({'signal_idx':i,'signal_date':df.index[i],'entry_price':float(e),'stop_loss':float(s)})
+    return sigs
 
-    vp  = valid_pair.values
-    sd  = stoch_div.values
-    nb  = no_break.values
-    bhl = below_high_limit.values
-    n   = len(vp)
+def _stoch_macd_bt(df):
+    close,high,low,open_=df['Close'],df['High'],df['Low'],df['Open']; cv,lv=close.values,low.values; n=len(df)
+    bb_lo=close.rolling(BB_LENGTH).mean()-BB_MULT*close.rolling(BB_LENGTH).std(ddof=0)
+    trig=(close>open_)&(low<=bb_lo)
+    vp=(trig.shift(1).fillna(False)&(close>open_)&(open_>=open_.shift(1))&(close>=open_.shift(1)))
+    ll=low.rolling(STOCH_K).min(); hh=high.rolling(STOCH_K).max(); sk=100*(close-ll)/(hh-ll)
+    sd=((low<low.shift(1).rolling(STOCH_LOOKBACK).min())&(sk>sk.shift(1).rolling(STOCH_LOOKBACK).min()))
+    tlo=low.where(trig).ffill(); nb=low.rolling(LOOKBACK).min()>=tlo
+    bhl=close<=0.85*high.rolling(YEAR_HIGH_BARS).max(); ml,sl_a,hist=compute_macd(close)
+    vpv,sdv,nbv,bhlv,tv=vp.values,sd.values,nb.values,bhl.values,trig.values; sigs=[]
+    for i in range(LOOKBACK+1,n-1):
+        if not nbv[i] or not bhlv[i]: continue
+        if not any(vpv[max(0,i-LOOKBACK):i]): continue
+        if not any(sdv[max(0,i-LOOKBACK):i]): continue
+        pi=max(0,i-LOOKBACK)
+        if np.isnan(hist[i]) or np.isnan(hist[pi]): continue
+        if not ((hist[i]>hist[pi]) or (ml[i]>ml[pi]) or (sl_a[i]>sl_a[pi])): continue
+        ti=next((k for k in range(i,max(i-LOOKBACK,-1),-1) if tv[k]),None)
+        if ti is None: continue
+        e,s=cv[ti],lv[ti]
+        if np.isnan(e) or np.isnan(s): continue
+        if (e-s)/e>MAX_STOP_DIST: continue
+        if sigs and sigs[-1]['signal_idx']==ti: continue
+        sigs.append({'signal_idx':ti,'signal_date':df.index[ti],'entry_price':float(e),'stop_loss':float(s)})
+    return sigs
 
-    if n < LOOKBACK + 2:
-        return False
-    if not nb[-1] or not bhl[-1]:
-        return False
-    if not any(vp[max(0, n - LOOKBACK):n]):
-        return False
-    if not any(sd[max(0, n - LOOKBACK):n]):
-        return False
+def _eval_bt(df,sig,pos,tgt):
+    idx,entry,stop=sig['signal_idx'],sig['entry_price'],sig['stop_loss']
+    n,win=len(df),entry*(1+tgt); shares=pos/entry
+    result,exit_price,exit_bar='NEUTRAL',None,None
+    for w in range(1,HOLD_BARS+1):
+        fi=idx+w
+        if fi>=n: break
+        wh,wl=float(df['High'].iloc[fi]),float(df['Low'].iloc[fi])
+        if wh>=win: result,exit_price,exit_bar='WIN',win,w; break
+        if wl<=stop: result,exit_price,exit_bar='LOSS',stop,w; break
+    if result=='NEUTRAL':
+        last=min(idx+HOLD_BARS,n-1); exit_price=float(df['Close'].iloc[last]); exit_bar=min(HOLD_BARS,n-1-idx)
+    pct=(exit_price-entry)/entry*100; dollar=shares*(exit_price-entry)
+    return {'result':result,'pct_return':pct if not np.isnan(pct) else 0.0,
+            'dollar_return':dollar if not np.isnan(dollar) else 0.0}
 
-    # MACD: current vs LOOKBACK bars ago
-    i      = n - 1
-    past_i = max(0, i - LOOKBACK)
-    if np.isnan(histogram[i]) or np.isnan(histogram[past_i]):
-        return False
-    macd_higher = (histogram[i] > histogram[past_i]) or \
-                  (macd_line[i] > macd_line[past_i]) or \
-                  (signal_line[i] > signal_line[past_i])
-    return macd_higher
+def _best_ev(trades_by_target):
+    best_tgt,best_ev,best_wr=WIN_TARGET,0.0,0.0
+    for tgt,trades in trades_by_target.items():
+        if not trades: continue
+        n=len(trades); wins=[t for t in trades if t['result']=='WIN']; loss=[t for t in trades if t['result']=='LOSS']
+        wr=len(wins)/n*100; lr=len(loss)/n*100
+        aw=safe_mean([t['pct_return'] for t in wins]); al=safe_mean([t['pct_return'] for t in loss])
+        ev=(wr/100*aw)+(lr/100*al)
+        if ev>best_ev: best_ev,best_tgt,best_wr=ev,tgt,wr
+    return best_tgt,best_wr,best_ev
 
-# ── Main scan ──────────────────────────────────────────────────────────────────
-def run_scans(tickers):
-    ultra_results    = []   # VixFix div + MACD div + Stoch div
-    high_results     = []   # VixFix div + Stoch div (no MACD)
-    standard_results = []   # Stoch div only
-    bb_only_results  = []   # BB trigger only (Tier 3B)
-    stoch_macd_results = [] # Stoch + MACD (Tier 3C)
-
-    min_bars = max(VF_LB + MAX_GAP, YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + 10
-
-    print(f'Scanning {len(tickers)} tickers...\n')
-
-    for i, ticker in enumerate(tickers):
+def run_inline_backtest(tickers):
+    print(f'\nRunning inline backtest ({BACKTEST_SAMPLE} ticker sample)...')
+    sample=random.sample(tickers,min(BACKTEST_SAMPLE,len(tickers)))
+    cutoff=pd.Timestamp.now()-pd.DateOffset(years=YEARS_HISTORY)
+    min_bars=max(VF_LB+MAX_GAP,YEAR_HIGH_BARS+LOOKBACK+STOCH_LOOKBACK)+HOLD_BARS+10
+    tt={k:{tgt:[] for tgt in EV_TARGETS} for k in ['ultra','high','standard','bb_only','stoch_macd']}
+    for ticker in sample:
         try:
-            df = yf.download(ticker, period='3y', interval='1wk', progress=False, auto_adjust=True)
-            if df is None or len(df) < min_bars:
-                continue
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            close_clean = df['Close'].dropna()
-            if close_clean.empty:
-                continue
-            current_price = float(close_clean.iloc[-1])
-            if np.isnan(current_price) or current_price < MIN_PRICE:
-                continue
-
+            df=yf.download(ticker,period='max',interval=INTERVAL,progress=False,auto_adjust=True)
+            if df is None or len(df)<min_bars: continue
+            if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.get_level_values(0)
+            df=df[df.index>=cutoff].copy()
+            if len(df)<min_bars: continue
+            cc=df['Close'].dropna()
+            if cc.empty: continue
+            rc=float(cc.iloc[-1])
+            if np.isnan(rc) or rc<MIN_PRICE: continue
             try:
-                mc = yf.Ticker(ticker).fast_info.market_cap
-                if mc is not None and mc < MIN_MARKET_CAP:
-                    continue
-            except:
-                pass
+                mc=yf.Ticker(ticker).fast_info.market_cap
+                if mc is not None and mc<MIN_MARKET_CAP: continue
+            except: pass
+            vf=_vixfix_bt(df); sa=_stoch_active_bt(df)
+            for sig in vf:
+                si,e=sig['signal_idx'],sig['entry_price']
+                if e<rc*0.15 or e>rc*6.0: continue
+                if si+1>=len(df): continue
+                hs=any((si+o) in sa for o in range(-SCAN_DELAY,SCAN_DELAY+1))
+                for tgt in EV_TARGETS:
+                    t=_eval_bt(df,sig,POSITION_HIGH,tgt)
+                    if sig['has_macd'] and hs: tt['ultra'][tgt].append(t)
+                    if hs: tt['high'][tgt].append(t)
+            for sig in _stoch_bt(df):
+                si,e=sig['signal_idx'],sig['entry_price']
+                if e<rc*0.15 or e>rc*6.0: continue
+                if si+1>=len(df): continue
+                for tgt in EV_TARGETS: tt['standard'][tgt].append(_eval_bt(df,sig,POSITION_STD,tgt))
+            for sig in _bb_only_bt(df):
+                si,e=sig['signal_idx'],sig['entry_price']
+                if e<rc*0.15 or e>rc*6.0: continue
+                if si+1>=len(df): continue
+                for tgt in EV_TARGETS: tt['bb_only'][tgt].append(_eval_bt(df,sig,POSITION_STD,tgt))
+            for sig in _stoch_macd_bt(df):
+                si,e=sig['signal_idx'],sig['entry_price']
+                if e<rc*0.15 or e>rc*6.0: continue
+                if si+1>=len(df): continue
+                for tgt in EV_TARGETS: tt['stoch_macd'][tgt].append(_eval_bt(df,sig,POSITION_STD,tgt))
+        except: pass
+        time.sleep(0.03)
+    out={}
+    for tier in tt:
+        td=tt[tier].get(WIN_TARGET,[]); n=len(td)
+        if n==0:
+            out[tier]={'wr':None,'signals':0,'spm':0.0,'best_target':WIN_TARGET,'best_target_wr':None,'best_ev':None}
+            continue
+        wins=[t for t in td if t['result']=='WIN']; loss=[t for t in td if t['result']=='LOSS']
+        wr=len(wins)/n*100; lr=len(loss)/n*100
+        aw=safe_mean([t['pct_return'] for t in wins]); al=safe_mean([t['pct_return'] for t in loss])
+        ev=(wr/100*aw)+(lr/100*al); spm=n/(YEARS_HISTORY*12)
+        bt,bwr,bev=_best_ev(tt[tier])
+        out[tier]={'wr':wr,'signals':n,'spm':spm,'ev':ev,'best_target':bt,'best_target_wr':bwr,'best_ev':bev}
+    print('Inline backtest complete.'); return out
 
-            macd_line, signal_line, histogram = compute_macd(df['Close'])
-            has_macd_vf, has_vf = check_vixfix(df, macd_line, signal_line, histogram)
-            has_stoch           = check_stoch(df)
-            has_bb              = check_bb_only(df)
-            has_stoch_macd      = check_stoch_macd(df, macd_line, signal_line, histogram)
-
-            # Tier 1 ULTRA: VixFix + MACD + Stoch
-            if has_macd_vf and has_vf and has_stoch:
-                ultra_results.append(ticker)
-            # Tier 2 HIGH: VixFix + Stoch (no MACD requirement)
-            if has_vf and has_stoch:
-                high_results.append(ticker)
-            # Tier 3 STANDARD: Stoch only
-            if has_stoch:
-                standard_results.append(ticker)
-            # Tier 3B: BB trigger only
-            if has_bb:
-                bb_only_results.append(ticker)
-            # Tier 3C: Stoch + MACD
-            if has_stoch_macd:
-                stoch_macd_results.append(ticker)
-
-            tags = []
-            if has_macd_vf and has_vf and has_stoch: tags.append('ULTRA')
-            elif has_vf and has_stoch:               tags.append('HIGH')
-            elif has_stoch:                          tags.append('Stoch')
-            if has_bb:                               tags.append('BB-only')
-            if has_stoch_macd:                       tags.append('Stoch+MACD')
-            if tags:
-                print(f'  ✓ {ticker} — {" | ".join(tags)}')
-
-        except Exception as e:
-            print(f'  Error on {ticker}: {e}')
-
-        if (i + 1) % 100 == 0:
-            print(f'  [{i + 1}/{len(tickers)}] scanned...')
-
+def run_scans(tickers):
+    ultra,high,standard,bb_only,stoch_macd=[],[],[],[],[]
+    min_bars=max(VF_LB+MAX_GAP,YEAR_HIGH_BARS+LOOKBACK+STOCH_LOOKBACK)+10
+    print(f'Scanning {len(tickers)} tickers...\n')
+    for i,ticker in enumerate(tickers):
+        try:
+            df=yf.download(ticker,period='3y',interval=INTERVAL,progress=False,auto_adjust=True)
+            if df is None or len(df)<min_bars: continue
+            if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.get_level_values(0)
+            cc=df['Close'].dropna()
+            if cc.empty: continue
+            cp=float(cc.iloc[-1])
+            if np.isnan(cp) or cp<MIN_PRICE: continue
+            try:
+                mc=yf.Ticker(ticker).fast_info.market_cap
+                if mc is not None and mc<MIN_MARKET_CAP: continue
+            except: pass
+            ml,sl,hist=compute_macd(df['Close'])
+            hm,hv=check_vixfix(df,ml,sl,hist); hs=check_stoch(df)
+            hb=check_bb_only(df); hsm=check_stoch_macd(df,ml,sl,hist)
+            if hm and hv and hs: ultra.append(ticker)
+            if hv and hs: high.append(ticker)
+            if hs: standard.append(ticker)
+            if hb: bb_only.append(ticker)
+            if hsm: stoch_macd.append(ticker)
+            tags=[]
+            if hm and hv and hs: tags.append('ULTRA')
+            elif hv and hs: tags.append('HIGH')
+            elif hs: tags.append('Stoch')
+            if hb: tags.append('BB')
+            if hsm: tags.append('Stoch+MACD')
+            if tags: print(f'  ✓ {ticker} — {" | ".join(tags)}')
+        except Exception as e: print(f'  Error {ticker}: {e}')
+        if (i+1)%100==0: print(f'  [{i+1}/{len(tickers)}]')
         time.sleep(0.05)
+    return sorted(ultra),sorted(high),sorted(standard),sorted(bb_only),sorted(stoch_macd)
 
-    return (sorted(ultra_results), sorted(high_results), sorted(standard_results),
-            sorted(bb_only_results), sorted(stoch_macd_results))
-
-# ── Report builder ─────────────────────────────────────────────────────────────
-def build_report(ultra, high, standard, bb_only, stoch_macd,
-                 ultra_wr=None,    ultra_signals=None,    ultra_spm=None,
-                 high_wr=None,     high_signals=None,     high_spm=None,
-                 std_wr=None,      std_signals=None,      std_spm=None,
-                 bb_wr=None,       bb_signals=None,       bb_spm=None,
-                 sm_wr=None,       sm_signals=None,       sm_spm=None):
-
-    sep = '=' * 60
-
-    def wr_line(wr, signals, spm):
-        if wr is None:
-            return 'Win rate: run backtest to determine'
-        spm_str = f' | ~{spm:.1f} signals/month' if spm is not None else ''
-        return f'Backtest: {wr:.1f}% win rate | {signals} signals | 15yr{spm_str}'
-
-    def pos_note(wr):
-        if wr is None:
-            return '$5,000/trade (run backtest — may qualify for $10,000)'
-        return '$10,000/trade' if wr > 80 else '$5,000/trade'
-
-    lines = [
-        sep,
-        '★★★ TIER 1 — ULTRA CONFIDENCE ★★★',
-        'BB Trigger + VixFix divergence + MACD divergence + Stochastic divergence',
-        '',
-        '  WHAT IT LOOKS FOR:',
-        '  • BB Trigger candle: weekly green candle (close > open) whose low',
-        '    touches/pierces the BB lower band (20-period, 2.0 std). Confirmed',
-        '    by next candle: also green, opens >= trigger open, closes >= trigger open.',
-        '  • VixFix divergence: two trigger candles where recent price low <',
-        '    prior price low, AND recent WVF value > prior WVF (lower price, more fear).',
-        '  • MACD divergence: MACD histogram OR line/signal line is higher',
-        '    at the recent trigger vs the prior trigger.',
-        '  • Stochastic divergence: price makes a lower low but Stochastic K',
-        '    makes a higher low — active within ±5 bars of the trigger.',
-        '  Entry: close of BB trigger candle | Stop: low of BB trigger candle',
-        '',
-        f'  {wr_line(ultra_wr, ultra_signals, ultra_spm)}',
-        f'  Position: {pos_note(ultra_wr)} | Win target: 13% | Max hold: 20 weeks',
-        '  Filters: Price >$10 | Mkt cap >$1B | Stop dist <11%',
-        '           No bar in prior 10 bars below trigger low',
-        '           No bar after trigger broke below trigger low',
-        sep,
-    ]
-    if ultra:
-        for t in ultra:
-            lines.append(f'  {t}')
-        lines.append(f'Total: {len(ultra)}')
+def _tier_html(tier_name,title,description,tickers_this_tier,stats,pos_size,hide_already_in=None):
+    wr=stats.get('wr'); n_sigs=stats.get('signals',0); spm=stats.get('spm',0.0)
+    best_tgt=stats.get('best_target',WIN_TARGET); best_tgt_wr=stats.get('best_target_wr'); best_ev=stats.get('best_ev')
+    pos_note=f'${pos_size:,.0f}/trade'
+    if wr is not None and wr>80: pos_note='<strong>$10,000/trade</strong>'
+    wr_str=(f'{wr:.1f}% win rate &nbsp;|&nbsp; {n_sigs} signals over 15yr &nbsp;|&nbsp; ~{spm:.1f}/mo'
+            if wr is not None else 'Run full backtest (backtest.py) to determine win rate')
+    best_ev_str=''
+    if best_tgt is not None and best_tgt_wr is not None and best_ev is not None:
+        best_ev_str=(f'<br><em>Best EV target: <strong>{int(best_tgt*100)}%</strong> '
+                     f'&nbsp;|&nbsp; Win rate at that target: <strong>{best_tgt_wr:.1f}%</strong> '
+                     f'&nbsp;|&nbsp; EV: {best_ev:+.2f}%</em>')
+    excl=set(hide_already_in) if hide_already_in else set()
+    show=[t for t in tickers_this_tier if t not in excl]
+    if show:
+        ticker_html='<br>'.join(f'&nbsp;&nbsp;<span style="color:#cc0000;font-weight:bold;">{t}</span>' for t in show)
+        ticker_html+=f'<br><em>Total: {len(show)}'
+        if excl: ticker_html+=f' (excl. higher tiers) | All {tier_name}: {len(tickers_this_tier)}'
+        ticker_html+='</em>'
     else:
-        lines.append('  No Tier 1 signals this week.')
+        ticker_html=f'<em>No {tier_name} signals this week.</em>'
+    return f'''
+<div style="border:1px solid #ccc;border-radius:6px;padding:14px;margin-bottom:18px;background:#fafafa;">
+  <h2 style="margin:0 0 6px 0;font-size:1.1em;color:#222;">{title}</h2>
+  <p style="margin:2px 0;font-size:0.85em;color:#555;">{description}</p>
+  <p style="margin:6px 0;font-size:0.85em;">
+    <strong>Backtest ({YEARS_HISTORY}yr, weekly, {BACKTEST_SAMPLE}-ticker sample):</strong> {wr_str}{best_ev_str}
+  </p>
+  <p style="margin:4px 0;font-size:0.85em;">
+    <strong>Position:</strong> {pos_note} &nbsp;|&nbsp;
+    <strong>Win target:</strong> {int(WIN_TARGET*100)}% &nbsp;|&nbsp;
+    <strong>Max hold:</strong> {HOLD_BARS} weeks &nbsp;|&nbsp;
+    Entry: close of BB trigger candle &nbsp;|&nbsp; Stop: low of BB trigger candle
+  </p>
+  <hr style="border:none;border-top:1px solid #ddd;margin:8px 0;">
+  <p style="margin:0;font-size:0.95em;line-height:1.9;">{ticker_html}</p>
+</div>'''
 
-    lines += ['', sep,
-        '★★ TIER 2 — HIGH CONFIDENCE ★★',
-        'BB Trigger + VixFix divergence + Stochastic divergence (MACD not required)',
-        '',
-        '  WHAT IT LOOKS FOR:',
-        '  • BB Trigger candle: same as Tier 1 (green, low ≤ BB lower, confirmed).',
-        '  • VixFix divergence: same as Tier 1 (lower price low + higher WVF).',
-        '  • Stochastic divergence: price lower low + stoch higher low, within',
-        '    ±5 bars. MACD divergence is NOT required.',
-        '  Entry: close of BB trigger candle | Stop: low of BB trigger candle',
-        '',
-        f'  {wr_line(high_wr, high_signals, high_spm)}',
-        f'  Position: {pos_note(high_wr)} | Win target: 13% | Max hold: 20 weeks',
-        '  Filters: Price >$10 | Mkt cap >$1B | Stop dist <11%',
-        '           No bar in prior 10 bars below trigger low',
-        '           No bar after trigger broke below trigger low',
-        sep,
-    ]
-    # High = VixFix+Stoch but exclude ULTRA (already shown above)
-    high_excl_ultra = sorted(set(high) - set(ultra))
-    if high_excl_ultra:
-        for t in high_excl_ultra:
-            lines.append(f'  {t}')
-        lines.append(f'Total (excl. Tier 1): {len(high_excl_ultra)} | All HIGH: {len(high)}')
-    else:
-        lines.append('  No additional Tier 2 signals this week.')
+def build_html_report(ultra,high,standard,bb_only,stoch_macd,bt_stats):
+    from datetime import date
+    today=date.today().strftime('%B %d, %Y')
+    summary_rows=''.join(f'<tr><td>{lbl}</td><td style="text-align:center;">{n}</td></tr>\n'
+                         for lbl,n in [('Tier 1 ULTRA',len(ultra)),('Tier 2 HIGH',len(high)),
+                                       ('Tier 3 STANDARD',len(standard)),('Tier 3B STD-BB',len(bb_only)),
+                                       ('Tier 3C STD-MACD',len(stoch_macd))])
+    ts =_tier_html('ULTRA','★★★ TIER 1 — ULTRA CONFIDENCE',
+                   'BB Trigger + VixFix div + MACD div + Stochastic div. All four confirmed.',
+                   ultra,bt_stats.get('ultra',{}),POSITION_HIGH)
+    ts+=_tier_html('HIGH','★★ TIER 2 — HIGH CONFIDENCE',
+                   'BB Trigger + VixFix div + Stochastic div. MACD not required.',
+                   high,bt_stats.get('high',{}),POSITION_HIGH,hide_already_in=ultra)
+    ts+=_tier_html('STANDARD','★ TIER 3 — STANDARD',
+                   'BB Trigger + Stochastic div. No VixFix or MACD.',
+                   standard,bt_stats.get('standard',{}),POSITION_STD,hide_already_in=set(ultra)|set(high))
+    ts+=_tier_html('STD-BB','★ TIER 3B — STANDARD-BB (BB Trigger only)',
+                   'Confirmed BB touch trigger candle. No other indicators. Baseline.',
+                   bb_only,bt_stats.get('bb_only',{}),POSITION_STD,
+                   hide_already_in=set(ultra)|set(high)|set(standard))
+    ts+=_tier_html('STD-MACD','★ TIER 3C — STANDARD-MACD',
+                   'BB Trigger + Stochastic div + MACD div. No VixFix.',
+                   stoch_macd,bt_stats.get('stoch_macd',{}),POSITION_STD,
+                   hide_already_in=set(ultra)|set(high))
+    return f'''<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>body{{font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:680px;margin:0 auto;padding:20px;}}
+table{{border-collapse:collapse;width:100%;margin-bottom:14px;}}th,td{{border:1px solid #ccc;padding:5px 10px;font-size:0.85em;}}th{{background:#f0f0f0;}}</style>
+</head><body>
+<h1 style="font-size:1.3em;margin-bottom:4px;">Weekly Stock Scan — {today}</h1>
+<p style="margin:0 0 16px 0;font-size:0.85em;color:#666;">
+Interval: Weekly &nbsp;|&nbsp; Universe: NYSE + NASDAQ &nbsp;|&nbsp;
+Filters: Price &gt;$10, Mkt cap &gt;$1B, Stop dist &lt;11%</p>
+<h3 style="margin:0 0 6px 0;font-size:0.95em;">Signal Count Summary</h3>
+<table><tr><th>Tier</th><th>Signals This Week</th></tr>{summary_rows}</table>
+{ts}
+<p style="font-size:0.75em;color:#999;margin-top:20px;">
+Stats from {BACKTEST_SAMPLE}-ticker sample. Run backtest.py for definitive numbers.</p>
+</body></html>'''
 
-    lines += ['', sep,
-        '★ TIER 3 — STANDARD SIGNALS ★',
-        'BB Trigger + Stochastic divergence (no VixFix or MACD required)',
-        '',
-        '  WHAT IT LOOKS FOR:',
-        '  • BB Trigger candle: weekly green candle (close > open) whose low',
-        '    touches/pierces the BB lower band. Confirmed by next candle.',
-        '  • Stochastic divergence: within the prior 10 bars, price made a',
-        '    lower low while Stochastic K made a higher low.',
-        '  • No-break rule: no bar in prior 10 bars (or after trigger) broke',
-        '    below the trigger candle low. Price below 85% of 52-week high.',
-        '  No VixFix or MACD required.',
-        '  Entry: close of BB trigger candle | Stop: low of BB trigger candle',
-        '',
-        f'  {wr_line(std_wr, std_signals, std_spm)}',
-        f'  Position: {pos_note(std_wr)} | Win target: 13% | Max hold: 20 weeks',
-        sep,
-    ]
-    std_excl = sorted(set(standard) - set(high))
-    if std_excl:
-        for t in std_excl:
-            lines.append(f'  {t}')
-        lines.append(f'Total (excl. Tiers 1 & 2): {len(std_excl)} | All STANDARD: {len(standard)}')
-    else:
-        lines.append('  No additional Tier 3 signals this week.')
-
-    lines += ['', sep,
-        '★ TIER 3B — STANDARD-BB (BB Trigger only)',
-        'BB Trigger candle confirmed by next candle — no other indicators required',
-        '',
-        '  WHAT IT LOOKS FOR:',
-        '  • BB Trigger candle: weekly green candle (close > open) whose low',
-        '    touches/pierces the BB lower band (20-period, 2.0 std).',
-        '  • Confirmation candle: next candle also green, opens >= trigger open,',
-        '    closes >= trigger open.',
-        '  • No Stochastic, VixFix, or MACD required.',
-        '  • No-break rule: no bar in prior 10 bars broke below trigger low.',
-        '  • Stop distance must be <11%.',
-        '  Entry: close of BB trigger candle | Stop: low of BB trigger candle',
-        '  (Baseline: measures value of the BB touch trigger alone)',
-        '',
-        f'  {wr_line(bb_wr, bb_signals, bb_spm)}',
-        f'  Position: {pos_note(bb_wr)} | Win target: 13% | Max hold: 20 weeks',
-        sep,
-    ]
-    bb_excl = sorted(set(bb_only) - set(standard) - set(high))
-    if bb_excl:
-        for t in bb_excl:
-            lines.append(f'  {t}')
-        lines.append(f'Total (excl. higher tiers): {len(bb_excl)} | All BB-only: {len(bb_only)}')
-    else:
-        lines.append('  No additional Tier 3B signals this week.')
-
-    lines += ['', sep,
-        '★ TIER 3C — STANDARD-MACD (BB Trigger + Stochastic + MACD divergence)',
-        'BB Trigger + Stochastic divergence + MACD divergence (no VixFix required)',
-        '',
-        '  WHAT IT LOOKS FOR:',
-        '  • BB Trigger candle: same as Tier 3 (green, low ≤ BB lower, confirmed).',
-        '  • Stochastic divergence: price lower low + stoch higher low within',
-        '    prior 10 bars.',
-        '  • MACD divergence: MACD histogram or line/signal is higher now',
-        '    vs 10 bars ago. (No VixFix pair required.)',
-        '  • No-break rule and 85% of 52-week high filter applied.',
-        '  Entry: close of BB trigger candle | Stop: low of BB trigger candle',
-        '',
-        f'  {wr_line(sm_wr, sm_signals, sm_spm)}',
-        f'  Position: {pos_note(sm_wr)} | Win target: 13% | Max hold: 20 weeks',
-        sep,
-    ]
-    sm_excl = sorted(set(stoch_macd) - set(high) - set(ultra))
-    if sm_excl:
-        for t in sm_excl:
-            lines.append(f'  {t}')
-        lines.append(f'Total (excl. higher tiers): {len(sm_excl)} | All Stoch+MACD: {len(stoch_macd)}')
-    else:
-        lines.append('  No additional Tier 3C signals this week.')
-
-    lines += ['', sep, 'FULL SCAN SUMMARY', sep,
-        f'  Tier 1  ULTRA         (BB+VixFix+MACD+Stoch): {len(ultra)}',
-        f'  Tier 2  HIGH          (BB+VixFix+Stoch):       {len(high)}',
-        f'  Tier 3  STANDARD      (BB+Stoch):              {len(standard)}',
-        f'  Tier 3B STD-BB        (BB Trigger only):       {len(bb_only)}',
-        f'  Tier 3C STD-MACD      (BB+Stoch+MACD):        {len(stoch_macd)}',
-        sep,
-    ]
-    return '\n'.join(lines)
-
-def send_email(report):
-    msg = MIMEMultipart()
-    msg['From']    = GMAIL_USER
-    msg['To']      = TO_EMAIL
-    msg['Subject'] = 'Weekly Stock Scan Results'
-    msg.attach(MIMEText(report, 'plain'))
+def send_email(subject,html_body):
+    msg=MIMEMultipart('alternative'); msg['From']=GMAIL_USER; msg['To']=TO_EMAIL; msg['Subject']=subject
+    msg.attach(MIMEText(html_body,'html'))
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
-            s.login(GMAIL_USER, GMAIL_PASSWORD)
-            s.sendmail(GMAIL_USER, TO_EMAIL, msg.as_string())
-        print('\nEmail sent successfully.')
-    except Exception as e:
-        print(f'\nEmail failed: {e}')
+        with smtplib.SMTP_SSL('smtp.gmail.com',465) as s:
+            s.login(GMAIL_USER,GMAIL_PASSWORD); s.sendmail(GMAIL_USER,TO_EMAIL,msg.as_string())
+        print('Email sent.')
+    except Exception as e: print(f'Email failed: {e}')
 
-if __name__ == '__main__':
-    tickers = get_all_tickers()
-    ultra, high, standard, bb_only, stoch_macd = run_scans(tickers)
-
-    # ── Plug in backtest stats below once you have them ────────────────────────
-    # Format: wr = win rate (float), signals = total signals (int),
-    #         spm = signals per month (float)
-    report = build_report(
-        ultra, high, standard, bb_only, stoch_macd,
-        ultra_wr=None,  ultra_signals=None,  ultra_spm=None,
-        high_wr=None,   high_signals=None,   high_spm=None,
-        std_wr=None,    std_signals=None,    std_spm=None,
-        bb_wr=None,     bb_signals=None,     bb_spm=None,
-        sm_wr=None,     sm_signals=None,     sm_spm=None,
-    )
-
-    print('\n' + report)
+if __name__=='__main__':
+    tickers=get_all_tickers()
+    ultra,high,standard,bb_only,stoch_macd=run_scans(tickers)
+    bt_stats=run_inline_backtest(tickers)
+    html=build_html_report(ultra,high,standard,bb_only,stoch_macd,bt_stats)
+    print(f'\n[Done] ULTRA:{len(ultra)} HIGH:{len(high)} STD:{len(standard)} BB:{len(bb_only)} SM:{len(stoch_macd)}')
     if GMAIL_USER:
-        send_email(report)
+        from datetime import date
+        send_email(f'Weekly Stock Scan — {date.today().strftime("%b %d %Y")}',html)
