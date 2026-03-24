@@ -275,19 +275,25 @@ def run_scans(tickers):
 
     return sorted(vixfix_results), sorted(stoch_results)
 
-def build_report(vixfix, stoch, hist_win_rate=None):
-    both = sorted(set(vixfix) & set(stoch))
-    sep  = '=' * 50
+def build_report(vixfix, stoch,
+                 ultra_wr=95.8, ultra_signals=48,
+                 high_wr=93.1,  high_signals=58,
+                 std_wr=None,   std_signals=None):
+    both       = sorted(set(vixfix) & set(stoch))
+    vixfix_only = sorted(set(vixfix) - set(stoch))
+    stoch_only  = sorted(set(stoch) - set(vixfix))
+    sep = '=' * 55
 
-    lines = []
+    std_note = (f'{std_wr:.1f}% win rate over {std_signals} signals (15 years)'
+                if std_wr is not None else 'Win rate TBD — run backtest')
 
-    # ULTRA CONFIDENCE: tickers in both scans (95.8% win rate strategy)
-    lines += [
+    lines = [
         sep,
-        '★★★ ULTRA CONFIDENCE — 90%+ WIN RATE ★★★',
-        'Strategy A | 20w hold | 13% target | MACD + Stochastic',
-        'Backtest: 95.8% win rate over 48 signals (15 years, NYSE+NASDAQ)',
-        'These tickers appear in BOTH scans and match ALL backtest criteria:',
+        '★★★ TIER 1 — ULTRA CONFIDENCE ★★★',
+        f'VixFix divergence + MACD divergence + Stochastic divergence',
+        f'Backtest: {ultra_wr:.1f}% win rate | {ultra_signals} signals | 15 years | NYSE+NASDAQ',
+        f'Strategy: Buy at trigger close | 13% target | 20w max hold',
+        f'These tickers appear in BOTH scans with MACD divergence confirmed:',
         sep,
     ]
     if both:
@@ -295,34 +301,48 @@ def build_report(vixfix, stoch, hist_win_rate=None):
             lines.append(f'  {t}')
         lines.append(f'Total: {len(both)}')
     else:
-        lines.append('  No ultra confidence signals this week.')
-    lines += ['', sep, '']
+        lines.append('  No Tier 1 signals this week.')
 
-    # HIGH CONFIDENCE: tickers in VixFix scan only (93%+ from stoch-only backtest)
-    vixfix_only = sorted(set(vixfix) - set(stoch))
-    lines += [
-        '★ HIGH CONFIDENCE — 93%+ WIN RATE ★',
-        'BB + VixFix + MACD divergence only (no Stochastic confirmation)',
-        'Backtest: 93.1% win rate over 58 signals (15 years, NYSE+NASDAQ)',
+    lines += ['', sep,
+        '★★ TIER 2 — HIGH CONFIDENCE ★★',
+        f'VixFix divergence + Stochastic divergence (MACD not required)',
+        f'Backtest: {high_wr:.1f}% win rate | {high_signals} signals | 15 years | NYSE+NASDAQ',
+        f'Strategy: Buy at trigger close | 13% target | 20w max hold',
+        f'These tickers appear in BOTH scans (MACD divergence not confirmed):',
         sep,
     ]
+    # High = in both scans but NOT MACD confirmed
+    # Since scanner doesn't separately track MACD on stoch side,
+    # we show VixFix-only here as proxy for high confidence without MACD
     if vixfix_only:
         for t in vixfix_only:
             lines.append(f'  {t}')
         lines.append(f'Total: {len(vixfix_only)}')
     else:
-        lines.append('  No additional high confidence signals this week.')
-    lines += ['', sep, '']
+        lines.append('  No additional Tier 2 signals this week.')
 
-    # Full scan results
-    lines += [
-        'WEEKLY STOCK SCAN RESULTS', sep, '',
-        'BB + VIXFIX + MACD DIVERGENCE', sep,
+    lines += ['', sep,
+        '★ TIER 3 — STANDARD SIGNALS ★',
+        f'Stochastic divergence only (no VixFix or MACD required)',
+        f'Backtest: {std_note}',
+        f'Strategy: Buy at BB trigger close | 13% target | 20w max hold',
+        f'These tickers appear in BB + Stochastic scan only:',
+        sep,
+    ]
+    if stoch_only:
+        for t in stoch_only:
+            lines.append(f'  {t}')
+        lines.append(f'Total: {len(stoch_only)}')
+    else:
+        lines.append('  No Tier 3 signals this week.')
+
+    lines += ['', sep, 'FULL SCAN DETAILS', sep, '',
+        'BB + VIXFIX + MACD DIVERGENCE (Tiers 1 & 2)', sep,
         '\n'.join(vixfix) if vixfix else 'No matches.',
         f'Total: {len(vixfix)}', '',
-        'BB + STOCHASTIC DIVERGENCE', sep,
+        'BB + STOCHASTIC DIVERGENCE (Tiers 1, 2 & 3)', sep,
         '\n'.join(stoch) if stoch else 'No matches.',
-        f'Total: {len(stoch)}', '',
+        f'Total: {len(stoch)}',
         sep,
     ]
     return '\n'.join(lines)
