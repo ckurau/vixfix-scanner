@@ -1,30 +1,53 @@
-name: Weekly Stock Scanners
+name: Stock Scanners
 
 on:
   schedule:
-    # 12pm PST = 8pm UTC every Friday
+    # Weekly scanner: every Friday 12pm PST (8pm UTC)
     - cron: '0 20 * * 5'
+    # Daily scanner: Mon-Fri, 30min after market close (9pm UTC / 1pm PST)
+    - cron: '0 21 * * 1-5'
   workflow_dispatch:
 
 jobs:
-  combined-scan:
+
+  # ── Weekly scan (Fridays only) ──────────────────────────────────────────────
+  weekly-scan:
     runs-on: ubuntu-latest
-    name: VixFix + Stochastic Combined Scan
+    name: Weekly Scan (VixFix + Stoch + MACD + BB)
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 20 * * 5'
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
       - run: pip install yfinance pandas numpy requests
-      - name: Run combined scan
+      - name: Run weekly scan
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
         run: python scanner_combined.py
 
-  backtest:
+  # ── Daily scan (Mon-Fri) ────────────────────────────────────────────────────
+  daily-scan:
     runs-on: ubuntu-latest
-    name: Backtest Both Scans
+    name: Daily Scan (VixFix + Stoch + MACD + BB)
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 21 * * 1-5'
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy requests
+      - name: Run daily scan
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: python scanner_daily.py
+
+  # ── Weekly backtest (manual dispatch only) ──────────────────────────────────
+  backtest-weekly:
+    runs-on: ubuntu-latest
+    name: Backtest - Weekly bars
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v3
@@ -32,15 +55,33 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install yfinance pandas numpy requests
-      - name: Run backtest
+      - name: Run weekly backtest
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
         run: python backtest.py
 
+  # ── Daily backtest (manual dispatch only) ───────────────────────────────────
+  backtest-daily:
+    runs-on: ubuntu-latest
+    name: Backtest - Daily bars
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy requests
+      - name: Run daily backtest
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: python backtest_daily.py
+
+  # ── Exit target optimization (manual dispatch only) ─────────────────────────
   optimize-exits:
     runs-on: ubuntu-latest
-    name: Optimize Exit Target
+    name: Optimize Exit Targets
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v3
@@ -54,6 +95,7 @@ jobs:
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
         run: python backtest_optimize.py
 
+  # ── Debug single ticker (manual dispatch only) ──────────────────────────────
   debug:
     runs-on: ubuntu-latest
     name: Debug Single Ticker
