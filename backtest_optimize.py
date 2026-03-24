@@ -17,29 +17,40 @@ VF_MULT        = 2.0
 VF_LB          = 75
 VF_PH          = 0.85
 MAX_GAP        = 35
-MAX_STOP_DIST  = 0.11        # Skip signals where stop is more than 11% below entry
 SCAN_DELAY     = 5
 VF_NEAR        = 2
 STOCH_LOOKBACK = 25
 STOCH_K        = 14
 LOOKBACK       = 10
 YEAR_HIGH_BARS = 52
+MACD_FAST      = 12
+MACD_SLOW      = 26
+MACD_SIGNAL    = 9
 
 # ── Backtest settings ──────────────────────────────────────────────────────────
-HOLD_WEEKS     = 15
+HOLD_WEEKS     = 20
 POSITION_SIZE  = 5000.0
-EXIT_TARGETS   = [i / 100 for i in range(5, 55, 5)]  # 5% to 50% in 5% steps
+EXIT_TARGETS   = [i / 100 for i in range(5, 55, 5)]
 
 # ── Filters ────────────────────────────────────────────────────────────────────
-MIN_PRICE      = 5.0
+MIN_PRICE      = 10.0
 MIN_MARKET_CAP = 1_000_000_000
+MAX_STOP_DIST  = 0.11
+NO_BREAK_BARS  = 10
 
-# ── Email settings ─────────────────────────────────────────────────────────────
+# ── Email ──────────────────────────────────────────────────────────────────────
 GMAIL_USER     = os.environ.get('GMAIL_USER', '')
 GMAIL_PASSWORD = os.environ.get('GMAIL_PASSWORD', '')
 TO_EMAIL       = 'bkcolby@yahoo.com'
 
-# ── Step 1: Fetch tickers ──────────────────────────────────────────────────────
+def safe_mean(values):
+    clean = [v for v in values if v is not None and not np.isnan(v)]
+    return np.mean(clean) if clean else 0.0
+
+def safe_sum(values):
+    clean = [v for v in values if v is not None and not np.isnan(v)]
+    return sum(clean) if clean else 0.0
+
 def get_all_tickers():
     headers = {'User-Agent': 'Mozilla/5.0'}
     tickers = []
@@ -65,11 +76,46 @@ def get_all_tickers():
     print(f'Total tickers fetched: {len(tickers)}')
     return tickers
 
-# ── Step 2: VixFix signals ─────────────────────────────────────────────────────
-def compute_vixfix(df):
-    close = df['Close']
-    low   = df['Low']
-    open_ = df['Open']
+def compute_macd(close):
+    ema_fast  = close.ewm(span=MACD_FAST,   adjust=False).mean()
+    ema_slow  = close.ewm(span=MACD_SLOW,   adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal    = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    histogram = macd_line - signal
+    return macd_line.values, signal.values, histogram.values
+
+def no_break_before(low_values, idx, n_bars):
+    trigger_low = low_values[idx]
+    for j in range(max(0, idx - n_bars), idx):
+        if low_values[j] < trigger_low:
+            return False
+    return True
+
+def no_break_after(low_values, idx, end_idx):
+    trigger_low = low_values[idx]
+    for j in range(idx + 1, end_idx + 1):
+        if low_values[j] < trigger_low:
+            return False
+    return True
+
+def macd_divergence(prior_idx, recent_idx, macd_line, signal_line, histogram):
+    vals = [histogram[prior_idx], histogram[recent_idx],
+            macd_line[prior_idx], macd_line[recent_idx],
+            signal_line[prior_idx], signal_line[recent_idx]]
+    if any(np.isnan(v) for v in vals):
+        return False
+    type_a = histogram[recent_idx] > histogram[prior_idx]
+    type_b = (macd_line[recent_idx] > macd_line[prior_idx]) or \
+             (signal_line[recent_idx] > signal_line[prior_idx])
+    return type_a or type_b
+
+def compute_vixfix_signals(df, macd_line, signal_line, histogram):
+    close   = df['Close']
+    low     = df['Low']
+    open_   = df['Open']
+    close_v = close.values
+    low_v   = low.values
+    n       = len(df)
 
     bb_mid   = close.rolling(BB_LENGTH).mean()
     bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
@@ -102,23 +148,25 @@ def compute_vixfix(df):
         shifted = wvf.shift(s).fillna(0)
         wvf_at_trigger = wvf_at_trigger.combine(shifted, lambda a, b: b if np.isnan(a) else max(a, b))
 
-    return trigger_with_vf, wvf_at_trigger, low
-
-def find_vixfix_signals(df):
-    trigger_with_vf, wvf_at_trigger, low = compute_vixfix(df)
     twvf  = trigger_with_vf.values
     wvf_v = wvf_at_trigger.values
-    low_v = low.values
-    n     = len(twvf)
     signals = []
 
     for recent_idx in range(n):
         if not twvf[recent_idx]:
             continue
-        recent_low = low_v[recent_idx]
-        recent_wvf = wvf_v[recent_idx]
+        recent_low   = low_v[recent_idx]
+        recent_close = close_v[recent_idx]
+        recent_wvf   = wvf_v[recent_idx]
         if np.isnan(recent_low) or np.isnan(recent_wvf):
             continue
+        if not no_break_before(low_v, recent_idx, NO_BREAK_BARS):
+            continue
+        if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
+            continue
+        if not no_break_after(low_v, recent_idx, n - 1):
+            continue
+
         for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
             if not twvf[j]:
                 continue
@@ -127,22 +175,18 @@ def find_vixfix_signals(df):
             if np.isnan(prior_low) or np.isnan(prior_wvf):
                 continue
             if recent_low < prior_low and recent_wvf > prior_wvf:
-                # Skip if stop loss is more than MAX_STOP_DIST below entry
-                entry_price = float(df['Close'].iloc[recent_idx])
-                stop_price  = float(low_v[recent_idx])
-                if (entry_price - stop_price) / entry_price > MAX_STOP_DIST:
+                if not macd_divergence(j, recent_idx, macd_line, signal_line, histogram):
                     break
                 signals.append({
                     'signal_idx':  recent_idx,
                     'signal_date': df.index[recent_idx],
-                    'entry_price': float(df['Close'].iloc[recent_idx]),
-                    'stop_loss':   float(low_v[recent_idx])
+                    'entry_price': float(recent_close),
+                    'stop_loss':   float(recent_low)
                 })
                 break
 
     return signals
 
-# ── Step 3: Stochastic active bars ────────────────────────────────────────────
 def find_stoch_signal_bars(df):
     close = df['Close']
     high  = df['High']
@@ -191,31 +235,22 @@ def find_stoch_signal_bars(df):
 
     return active
 
-# ── Step 4: Collect raw weekly data per signal ────────────────────────────────
 def collect_signal_data(df, signal):
-    """
-    Collect the weekly high/low/close for HOLD_WEEKS after signal.
-    Returns list of dicts — one per future week.
-    Used to evaluate multiple exit targets without re-downloading data.
-    """
     idx   = signal['signal_idx']
     n     = len(df)
     weeks = []
-
     for w in range(1, HOLD_WEEKS + 1):
-        future_idx = idx + w
-        if future_idx >= n:
+        fi = idx + w
+        if fi >= n:
             break
         weeks.append({
             'week':  w,
-            'high':  float(df['High'].iloc[future_idx]),
-            'low':   float(df['Low'].iloc[future_idx]),
-            'close': float(df['Close'].iloc[future_idx])
+            'high':  float(df['High'].iloc[fi]),
+            'low':   float(df['Low'].iloc[fi]),
+            'close': float(df['Close'].iloc[fi])
         })
-
     return weeks
 
-# ── Step 5: Evaluate one signal for a given exit target ───────────────────────
 def evaluate_signal(signal, weekly_data, win_target_pct):
     entry      = signal['entry_price']
     stop_loss  = signal['stop_loss']
@@ -227,20 +262,13 @@ def evaluate_signal(signal, weekly_data, win_target_pct):
     exit_week  = None
 
     for week in weekly_data:
-        # Win: intraday high touched target
         if week['high'] >= win_target:
-            result     = 'WIN'
-            exit_price = win_target
-            exit_week  = week['week']
+            result, exit_price, exit_week = 'WIN', win_target, week['week']
             break
-        # Loss: intraday low pierced stop
         if week['low'] <= stop_loss:
-            result     = 'LOSS'
-            exit_price = stop_loss
-            exit_week  = week['week']
+            result, exit_price, exit_week = 'LOSS', stop_loss, week['week']
             break
 
-    # Neutral: week 10 close or last available
     if result == 'NEUTRAL':
         if weekly_data:
             exit_price = weekly_data[-1]['close']
@@ -254,29 +282,37 @@ def evaluate_signal(signal, weekly_data, win_target_pct):
 
     return {
         'result':        result,
-        'pct_return':    pct_return,
-        'dollar_return': dollar_return,
+        'pct_return':    pct_return if not np.isnan(pct_return) else 0.0,
+        'dollar_return': dollar_return if not np.isnan(dollar_return) else 0.0,
         'exit_week':     exit_week,
         'ticker':        signal.get('ticker', ''),
         'date':          str(signal['signal_date'].date())
     }
 
-# ── Step 6: Run optimization ───────────────────────────────────────────────────
 def run_optimization(tickers):
-    # signals_data: list of (signal, weekly_data) tuples for confirmed signals
     signals_data = []
+    cutoff = pd.Timestamp.now() - pd.DateOffset(years=15)
     min_bars = max(VF_LB + MAX_GAP, YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + HOLD_WEEKS + 10
 
     print(f'Collecting signals from {len(tickers)} tickers...')
 
     for i, ticker in enumerate(tickers):
         try:
-            df = yf.download(ticker, period='5y', interval='1wk', progress=False, auto_adjust=True)
+            df = yf.download(ticker, period='max', interval='1wk', progress=False, auto_adjust=True)
             if df is None or len(df) < min_bars:
                 continue
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            if float(df['Close'].iloc[-1]) < MIN_PRICE:
+
+            df = df[df.index >= cutoff].copy()
+            if len(df) < min_bars:
+                continue
+
+            close_clean = df['Close'].dropna()
+            if close_clean.empty:
+                continue
+            recent_close = float(close_clean.iloc[-1])
+            if np.isnan(recent_close) or recent_close < MIN_PRICE:
                 continue
 
             try:
@@ -286,7 +322,8 @@ def run_optimization(tickers):
             except:
                 pass
 
-            vf_signals = find_vixfix_signals(df)
+            macd_line, signal_line, histogram = compute_macd(df['Close'])
+            vf_signals = compute_vixfix_signals(df, macd_line, signal_line, histogram)
             if not vf_signals:
                 continue
 
@@ -305,65 +342,61 @@ def run_optimization(tickers):
                 if sidx + 1 >= len(df):
                     continue
 
+                entry = signal['entry_price']
+                if entry < recent_close * 0.15 or entry > recent_close * 6.0:
+                    continue
+
                 signal['ticker'] = ticker
                 weekly_data = collect_signal_data(df, signal)
                 signals_data.append((signal, weekly_data))
-                print(f'  ✓ Signal: {ticker} {signal["signal_date"].date()}')
+                print(f'  ✓ {ticker} {signal["signal_date"].date()}')
 
         except Exception as e:
             print(f'  Error on {ticker}: {e}')
 
         if (i + 1) % 100 == 0:
-            print(f'  [{i + 1}/{len(tickers)}] — {len(signals_data)} signals collected...')
+            print(f'  [{i + 1}/{len(tickers)}] — {len(signals_data)} signals...')
 
         time.sleep(0.05)
 
-    print(f'\nTotal confirmed signals: {len(signals_data)}')
-    print(f'Testing {len(EXIT_TARGETS)} exit targets: {[f"{int(t*100)}%" for t in EXIT_TARGETS]}')
-    print()
+    print(f'\nTotal signals: {len(signals_data)}')
 
-    # Now evaluate every signal at every exit target
     results_by_target = {}
-
     for target in EXIT_TARGETS:
-        trades = []
-        for signal, weekly_data in signals_data:
-            trade = evaluate_signal(signal, weekly_data, target)
-            trades.append(trade)
+        trades = [evaluate_signal(sig, wd, target) for sig, wd in signals_data]
         results_by_target[target] = trades
 
     return results_by_target, signals_data
 
-# ── Step 7: Summarize optimization results ────────────────────────────────────
 def summarize_optimization(results_by_target):
-    sep  = '=' * 60
-    sep2 = '-' * 60
+    sep  = '=' * 62
+    sep2 = '-' * 62
     lines = [
         sep,
         'EXIT TARGET OPTIMIZATION REPORT',
-        'BB + VixFix + Stochastic — Both Scans Must Agree',
-        f'Position size: ${POSITION_SIZE:,.0f} per trade | Hold: {HOLD_WEEKS} weeks max',
+        'BB + VixFix + MACD + Stochastic | $5,000/trade | 20-week hold',
         sep,
-        f'{"Target":>8}  {"Signals":>8}  {"Win%":>7}  {"TotalP&L":>12}  {"AvgRet":>8}  {"RR Ratio":>9}',
+        f'{"Target":>8}  {"Signals":>8}  {"Win%":>7}  {"TotalP&L":>12}  {"AvgRet":>8}  {"ExpVal":>8}',
         sep2,
     ]
 
     summary_rows = []
 
     for target in EXIT_TARGETS:
-        trades   = results_by_target[target]
-        total    = len(trades)
+        trades = results_by_target[target]
+        total  = len(trades)
         if total == 0:
             continue
 
         wins     = [t for t in trades if t['result'] == 'WIN']
         losses   = [t for t in trades if t['result'] == 'LOSS']
         win_rate = len(wins) / total * 100
-        total_pnl= sum(t['dollar_return'] for t in trades)
-        avg_ret  = np.mean([t['pct_return'] for t in trades])
-        avg_win  = np.mean([t['pct_return'] for t in wins]) if wins else 0
-        avg_loss = abs(np.mean([t['pct_return'] for t in losses])) if losses else 0.001
-        rr_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+        loss_rate= len(losses) / total * 100
+        total_pnl= safe_sum([t['dollar_return'] for t in trades])
+        avg_ret  = safe_mean([t['pct_return'] for t in trades])
+        avg_win  = safe_mean([t['pct_return'] for t in wins])
+        avg_loss = safe_mean([t['pct_return'] for t in losses])
+        exp_val  = (win_rate/100 * avg_win) + (loss_rate/100 * avg_loss)
 
         summary_rows.append({
             'target':    target,
@@ -371,71 +404,62 @@ def summarize_optimization(results_by_target):
             'win_rate':  win_rate,
             'total_pnl': total_pnl,
             'avg_ret':   avg_ret,
-            'rr_ratio':  rr_ratio,
+            'exp_val':   exp_val,
             'avg_win':   avg_win,
-            'avg_loss':  avg_loss
+            'avg_loss':  avg_loss,
+            'loss_rate': loss_rate,
         })
 
         lines.append(
             f'{int(target*100):>7}%  {total:>8}  {win_rate:>6.1f}%  '
-            f'${total_pnl:>+11,.2f}  {avg_ret:>+7.1f}%  {rr_ratio:>8.2f}x'
+            f'${total_pnl:>+11,.2f}  {avg_ret:>+7.1f}%  {exp_val:>+7.2f}%'
         )
 
     lines.append(sep2)
 
-    # Best by each metric
     if summary_rows:
         best_pnl = max(summary_rows, key=lambda x: x['total_pnl'])
         best_wr  = max(summary_rows, key=lambda x: x['win_rate'])
-        best_rr  = max(summary_rows, key=lambda x: x['rr_ratio'])
+        best_ev  = max(summary_rows, key=lambda x: x['exp_val'])
 
         lines += [
             '',
-            '── Best by Each Metric ───────────────────────────────────',
-            f'Highest Total Profit:  {int(best_pnl["target"]*100)}% target  '
+            '── Best by each metric ──────────────────────────────────────',
+            f'Highest total profit:  {int(best_pnl["target"]*100)}% target  '
             f'(${best_pnl["total_pnl"]:+,.2f}  win rate {best_pnl["win_rate"]:.1f}%)',
-            f'Highest Win Rate:      {int(best_wr["target"]*100)}% target  '
-            f'({best_wr["win_rate"]:.1f}%  total P&L ${best_wr["total_pnl"]:+,.2f})',
-            f'Best Risk/Reward:      {int(best_rr["target"]*100)}% target  '
-            f'({best_rr["rr_ratio"]:.2f}x  avg win {best_rr["avg_win"]:.1f}%  avg loss {best_rr["avg_loss"]:.1f}%)',
+            f'Highest win rate:      {int(best_wr["target"]*100)}% target  '
+            f'({best_wr["win_rate"]:.1f}%  P&L ${best_wr["total_pnl"]:+,.2f})',
+            f'Best expected value:   {int(best_ev["target"]*100)}% target  '
+            f'(EV {best_ev["exp_val"]:+.2f}%  win {best_ev["win_rate"]:.1f}%  P&L ${best_ev["total_pnl"]:+,.2f})',
             '',
-            '── Recommendation ────────────────────────────────────────',
+            '── Overall recommendation (40% P&L + 35% win rate + 25% EV) ─',
         ]
 
-        # Score each target combining all three metrics (normalized)
         max_pnl = max(r['total_pnl'] for r in summary_rows) or 1
-        max_wr  = max(r['win_rate'] for r in summary_rows) or 1
-        max_rr  = max(r['rr_ratio'] for r in summary_rows) or 1
+        max_wr  = max(r['win_rate']  for r in summary_rows) or 1
+        max_ev  = max(r['exp_val']   for r in summary_rows) or 1
 
         for r in summary_rows:
-            r['score'] = (
-                (r['total_pnl'] / max_pnl) * 0.40 +   # 40% weight on profit
-                (r['win_rate']  / max_wr)  * 0.35 +   # 35% weight on win rate
-                (r['rr_ratio']  / max_rr)  * 0.25     # 25% weight on R/R
-            )
+            pnl_norm = r['total_pnl'] / max_pnl if max_pnl > 0 else 0
+            wr_norm  = r['win_rate']  / max_wr
+            ev_norm  = r['exp_val']   / max_ev if max_ev > 0 else 0
+            r['score'] = pnl_norm * 0.40 + wr_norm * 0.35 + ev_norm * 0.25
 
-        best_overall = max(summary_rows, key=lambda x: x['score'])
+        best = max(summary_rows, key=lambda x: x['score'])
         lines.append(
-            f'Overall best exit target: {int(best_overall["target"]*100)}%'
-        )
-        lines.append(
-            f'  Total P&L: ${best_overall["total_pnl"]:+,.2f}  |  '
-            f'Win rate: {best_overall["win_rate"]:.1f}%  |  '
-            f'R/R ratio: {best_overall["rr_ratio"]:.2f}x'
-        )
-        lines.append(
-            '  (Scored 40% profit + 35% win rate + 25% risk/reward)'
+            f'Overall best exit target: {int(best["target"]*100)}%\n'
+            f'  P&L: ${best["total_pnl"]:+,.2f}  Win rate: {best["win_rate"]:.1f}%  '
+            f'Expected value: {best["exp_val"]:+.2f}%'
         )
 
     lines.append(sep)
     return '\n'.join(lines)
 
-# ── Step 8: Send email ─────────────────────────────────────────────────────────
 def send_email(report):
     msg = MIMEMultipart()
     msg['From']    = GMAIL_USER
     msg['To']      = TO_EMAIL
-    msg['Subject'] = 'Stock Scanner — Exit Target Optimization Report'
+    msg['Subject'] = 'Exit Target Optimization Report'
     msg.attach(MIMEText(report, 'plain'))
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
@@ -445,7 +469,6 @@ def send_email(report):
     except Exception as e:
         print(f'Email failed: {e}')
 
-# ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     tickers = get_all_tickers()
     results_by_target, signals_data = run_optimization(tickers)
