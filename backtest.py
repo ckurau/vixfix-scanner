@@ -23,21 +23,20 @@ STOCH_LOOKBACK = 25
 STOCH_K        = 14
 LOOKBACK       = 10
 YEAR_HIGH_BARS = 52
-
-# ── MACD settings (matching your TOS chart exactly) ───────────────────────────
 MACD_FAST      = 12
 MACD_SLOW      = 26
 MACD_SIGNAL    = 9
+RSI_PERIOD     = 14
+RSI_PATH_B_BARS = 3   # bars before second trigger to check for RSI Path B
 
 # ── Backtest settings ──────────────────────────────────────────────────────────
-HOLD_WEEKS_SHORT = 15
-HOLD_WEEKS_LONG  = 30
-WIN_TARGET       = 0.13
-POSITION_SIZE    = 5000.0
-YEARS_HISTORY    = 15    # Download up to 15 years of weekly data
+HOLD_PERIODS   = [15, 20, 30]          # weeks
+WIN_TARGETS    = [0.11, 0.12, 0.13]   # 11%, 12%, 13%
+POSITION_SIZE  = 5000.0
+YEARS_HISTORY  = 15
 
 # ── Filters ────────────────────────────────────────────────────────────────────
-MIN_PRICE      = 5.0
+MIN_PRICE      = 10.0
 MIN_MARKET_CAP = 1_000_000_000
 MAX_STOP_DIST  = 0.11
 NO_BREAK_BARS  = 10
@@ -46,6 +45,10 @@ NO_BREAK_BARS  = 10
 GMAIL_USER     = os.environ.get('GMAIL_USER', '')
 GMAIL_PASSWORD = os.environ.get('GMAIL_PASSWORD', '')
 TO_EMAIL       = 'bkcolby@yahoo.com'
+
+def safe_mean(values):
+    clean = [v for v in values if v is not None and not np.isnan(v)]
+    return np.mean(clean) if clean else 0.0
 
 def get_all_tickers():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -73,56 +76,85 @@ def get_all_tickers():
     return tickers
 
 def compute_macd(close):
-    """Compute MACD line, Signal line, and Histogram using EMA"""
-    ema_fast   = close.ewm(span=MACD_FAST,   adjust=False).mean()
-    ema_slow   = close.ewm(span=MACD_SLOW,   adjust=False).mean()
-    macd_line  = ema_fast - ema_slow
-    signal     = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
-    histogram  = macd_line - signal
+    ema_fast  = close.ewm(span=MACD_FAST,   adjust=False).mean()
+    ema_slow  = close.ewm(span=MACD_SLOW,   adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal    = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    histogram = macd_line - signal
     return macd_line.values, signal.values, histogram.values
+
+def compute_rsi(close, period=14):
+    delta = close.diff()
+    gain  = delta.clip(lower=0)
+    loss  = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+    rs  = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def no_break_before(low_values, idx, n_bars):
     trigger_low = low_values[idx]
-    start = max(0, idx - n_bars)
-    for j in range(start, idx):
+    for j in range(max(0, idx - n_bars), idx):
+        if low_values[j] < trigger_low:
+            return False
+    return True
+
+def no_break_after(low_values, idx, current_idx):
+    """Check no candle between trigger and now has low below trigger low"""
+    trigger_low = low_values[idx]
+    for j in range(idx + 1, current_idx + 1):
         if low_values[j] < trigger_low:
             return False
     return True
 
 def macd_divergence(prior_idx, recent_idx, macd_line, signal_line, histogram):
-    """
-    Check MACD divergence between two trigger candles.
-    Price already confirmed lower low (recent < prior).
-    We need: histogram higher OR (macd_line higher OR signal_line higher)
-
-    Type A: histogram at recent > histogram at prior
-            (bars getting less negative = bullish divergence)
-    Type B: macd_line at recent > macd_line at prior
-            OR signal_line at recent > signal_line at prior
-
-    Returns True if either Type A or Type B is satisfied.
-    """
-    hist_prior   = histogram[prior_idx]
-    hist_recent  = histogram[recent_idx]
-    macd_prior   = macd_line[prior_idx]
-    macd_recent  = macd_line[recent_idx]
-    sig_prior    = signal_line[prior_idx]
-    sig_recent   = signal_line[recent_idx]
-
+    hist_prior  = histogram[prior_idx]
+    hist_recent = histogram[recent_idx]
+    macd_prior  = macd_line[prior_idx]
+    macd_recent = macd_line[recent_idx]
+    sig_prior   = signal_line[prior_idx]
+    sig_recent  = signal_line[recent_idx]
     if any(np.isnan(v) for v in [hist_prior, hist_recent, macd_prior, macd_recent, sig_prior, sig_recent]):
         return False
-
     type_a = hist_recent > hist_prior
     type_b = (macd_recent > macd_prior) or (sig_recent > sig_prior)
-
     return type_a or type_b
 
-def find_vixfix_signals(df, macd_line, signal_line, histogram):
+def rsi_divergence(prior_idx, recent_idx, rsi_values):
+    """
+    Path A: RSI at second trigger > RSI at first trigger
+    Path B: RSI at second trigger > RSI at any of RSI_PATH_B_BARS bars before second trigger
+    Returns (has_divergence, path_used)
+    """
+    rsi_recent = rsi_values[recent_idx]
+    rsi_prior  = rsi_values[prior_idx]
+
+    if np.isnan(rsi_recent):
+        return False, None
+
+    # Path A: trigger to trigger
+    if not np.isnan(rsi_prior) and rsi_recent > rsi_prior:
+        return True, 'A'
+
+    # Path B: recent trigger RSI higher than any of N bars before it
+    for k in range(1, RSI_PATH_B_BARS + 1):
+        j = recent_idx - k
+        if j < 0:
+            break
+        rsi_before = rsi_values[j]
+        if not np.isnan(rsi_before) and rsi_recent > rsi_before:
+            return True, 'B'
+
+    return False, None
+
+def find_vixfix_signals(df, macd_line, signal_line, histogram, rsi_values):
     close   = df['Close']
     low     = df['Low']
     open_   = df['Open']
     close_v = close.values
     low_v   = low.values
+    n_total = len(df)
 
     bb_mid   = close.rolling(BB_LENGTH).mean()
     bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
@@ -157,14 +189,9 @@ def find_vixfix_signals(df, macd_line, signal_line, histogram):
 
     twvf  = trigger_with_vf.values
     wvf_v = wvf_at_trigger.values
-    n     = len(twvf)
     signals = []
-    skipped_nobreak = 0
-    skipped_stopdist = 0
-    skipped_macd = 0
-    skipped_novixdiv = 0
 
-    for recent_idx in range(n):
+    for recent_idx in range(len(twvf)):
         if not twvf[recent_idx]:
             continue
         recent_low   = low_v[recent_idx]
@@ -173,16 +200,16 @@ def find_vixfix_signals(df, macd_line, signal_line, histogram):
 
         if np.isnan(recent_low) or np.isnan(recent_wvf):
             continue
-
         if not no_break_before(low_v, recent_idx, NO_BREAK_BARS):
-            skipped_nobreak += 1
             continue
-
         if (recent_close - recent_low) / recent_close > MAX_STOP_DIST:
-            skipped_stopdist += 1
             continue
 
-        found = False
+        # Post-trigger noBreak: no candle after trigger broke below trigger low
+        # (only check up to last available bar, not into the future)
+        if not no_break_after(low_v, recent_idx, n_total - 1):
+            continue
+
         for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
             if not twvf[j]:
                 continue
@@ -191,27 +218,22 @@ def find_vixfix_signals(df, macd_line, signal_line, histogram):
             if np.isnan(prior_low) or np.isnan(prior_wvf):
                 continue
             if recent_low < prior_low and recent_wvf > prior_wvf:
-                # Check MACD divergence
                 if not macd_divergence(j, recent_idx, macd_line, signal_line, histogram):
-                    skipped_macd += 1
                     break
+                # Check RSI divergence
+                has_rsi, rsi_path = rsi_divergence(j, recent_idx, rsi_values)
                 signals.append({
-                    'signal_idx':  recent_idx,
-                    'signal_date': df.index[recent_idx],
-                    'entry_price': float(recent_close),
-                    'stop_loss':   float(recent_low)
+                    'signal_idx':   recent_idx,
+                    'prior_idx':    j,
+                    'signal_date':  df.index[recent_idx],
+                    'entry_price':  float(recent_close),
+                    'stop_loss':    float(recent_low),
+                    'has_rsi_div':  has_rsi,
+                    'rsi_path':     rsi_path,
                 })
-                found = True
                 break
 
-        if not found and not any(twvf[max(recent_idx - MAX_GAP, 0):recent_idx]):
-            skipped_novixdiv += 1
-
-    return signals, {
-        'skipped_nobreak':  skipped_nobreak,
-        'skipped_stopdist': skipped_stopdist,
-        'skipped_macd':     skipped_macd,
-    }
+    return signals
 
 def find_stoch_signal_bars(df):
     close = df['Close']
@@ -261,66 +283,124 @@ def find_stoch_signal_bars(df):
 
     return active
 
-def backtest_signal(df, signal, hold_weeks):
+def backtest_signal_strategy_a(df, signal, hold_weeks, win_target_pct):
+    """Strategy A: buy at close of second trigger candle"""
     idx        = signal['signal_idx']
     entry      = signal['entry_price']
     stop_loss  = signal['stop_loss']
-    win_target = entry * (1 + WIN_TARGET)
+    win_target = entry * (1 + win_target_pct)
     shares     = POSITION_SIZE / entry
     n          = len(df)
 
-    result     = 'NEUTRAL'
+    result = 'NEUTRAL'
     exit_price = None
     exit_week  = None
 
     for w in range(1, hold_weeks + 1):
-        future_idx = idx + w
-        if future_idx >= n:
+        fi = idx + w
+        if fi >= n:
             break
-        week_high = float(df['High'].iloc[future_idx])
-        week_low  = float(df['Low'].iloc[future_idx])
-
-        if week_high >= win_target:
-            result     = 'WIN'
-            exit_price = win_target
-            exit_week  = w
+        wh = float(df['High'].iloc[fi])
+        wl = float(df['Low'].iloc[fi])
+        if wh >= win_target:
+            result, exit_price, exit_week = 'WIN', win_target, w
             break
-        if week_low <= stop_loss:
-            result     = 'LOSS'
-            exit_price = stop_loss
-            exit_week  = w
+        if wl <= stop_loss:
+            result, exit_price, exit_week = 'LOSS', stop_loss, w
             break
 
     if result == 'NEUTRAL':
-        last_idx   = min(idx + hold_weeks, n - 1)
-        exit_price = float(df['Close'].iloc[last_idx])
+        last = min(idx + hold_weeks, n - 1)
+        exit_price = float(df['Close'].iloc[last])
         exit_week  = min(hold_weeks, n - 1 - idx)
 
-    pct_return    = (exit_price - entry) / entry * 100
-    dollar_return = shares * (exit_price - entry)
+    pct    = (exit_price - entry) / entry * 100
+    dollar = shares * (exit_price - entry)
+    return {'result': result, 'entry': entry, 'stop_loss': stop_loss,
+            'exit_price': exit_price, 'exit_week': exit_week,
+            'pct_return': pct, 'dollar_return': dollar,
+            'ticker': signal['ticker'], 'date': signal['date']}
 
-    return {
-        'result':        result,
-        'entry':         entry,
-        'stop_loss':     stop_loss,
-        'exit_price':    exit_price,
-        'exit_week':     exit_week,
-        'pct_return':    pct_return,
-        'shares':        shares,
-        'dollar_return': dollar_return
-    }
+def backtest_signal_strategy_b(df, signal, hold_weeks, win_target_pct):
+    """
+    Strategy B: wait for any candle after trigger to drop to or below
+    the trigger close price, then enter at that price.
+    Stop stays at trigger candle low.
+    If price never pulls back within hold_weeks, no trade taken (skip).
+    """
+    trigger_idx   = signal['signal_idx']
+    trigger_close = signal['entry_price']
+    stop_loss     = signal['stop_loss']
+    n             = len(df)
+
+    # Find entry bar: first bar after trigger where low <= trigger_close
+    entry_idx   = None
+    entry_price = None
+
+    for w in range(1, hold_weeks + 1):
+        fi = trigger_idx + w
+        if fi >= n:
+            break
+        bar_low   = float(df['Low'].iloc[fi])
+        bar_close = float(df['Close'].iloc[fi])
+        if bar_low <= trigger_close:
+            entry_idx   = fi
+            entry_price = trigger_close  # enter at trigger close price
+            break
+
+    if entry_idx is None:
+        return None  # no pullback occurred — no trade
+
+    win_target = entry_price * (1 + win_target_pct)
+    shares     = POSITION_SIZE / entry_price
+
+    result = 'NEUTRAL'
+    exit_price = None
+    exit_week  = None
+
+    bars_remaining = hold_weeks - (entry_idx - trigger_idx)
+    for w in range(1, bars_remaining + 1):
+        fi = entry_idx + w
+        if fi >= n:
+            break
+        wh = float(df['High'].iloc[fi])
+        wl = float(df['Low'].iloc[fi])
+        if wh >= win_target:
+            result, exit_price, exit_week = 'WIN', win_target, w
+            break
+        if wl <= stop_loss:
+            result, exit_price, exit_week = 'LOSS', stop_loss, w
+            break
+
+    if result == 'NEUTRAL':
+        last = min(entry_idx + bars_remaining, n - 1)
+        exit_price = float(df['Close'].iloc[last])
+        exit_week  = min(bars_remaining, n - 1 - entry_idx)
+
+    pct    = (exit_price - entry_price) / entry_price * 100
+    dollar = shares * (exit_price - entry_price)
+    return {'result': result, 'entry': entry_price, 'stop_loss': stop_loss,
+            'exit_price': exit_price, 'exit_week': exit_week,
+            'pct_return': pct, 'dollar_return': dollar,
+            'ticker': signal['ticker'], 'date': signal['date']}
 
 def run_backtest(tickers):
-    all_trades_short = []
-    all_trades_long  = []
-    total_skipped_nobreak  = 0
-    total_skipped_stopdist = 0
-    total_skipped_macd     = 0
+    """
+    Returns dict of results keyed by (strategy, hold_weeks, win_target, rsi_filter)
+    rsi_filter: 'all' = no RSI filter, 'rsi_only' = RSI divergence required
+    """
+    # Initialize results buckets
+    results = {}
+    for strategy in ['A', 'B']:
+        for hold in HOLD_PERIODS:
+            for target in WIN_TARGETS:
+                for rsi_f in ['all', 'rsi']:
+                    results[(strategy, hold, target, rsi_f)] = []
 
-    cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=YEARS_HISTORY)
-    min_bars = max(VF_LB + MAX_GAP, YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + HOLD_WEEKS_LONG + 10
+    cutoff = pd.Timestamp.now() - pd.DateOffset(years=YEARS_HISTORY)
+    min_bars = max(VF_LB + MAX_GAP, YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + max(HOLD_PERIODS) + 10
 
-    print(f'Backtesting {len(tickers)} tickers (up to {YEARS_HISTORY} years of weekly data)...')
+    print(f'Backtesting {len(tickers)} tickers ({YEARS_HISTORY} years)...')
 
     for i, ticker in enumerate(tickers):
         try:
@@ -330,15 +410,13 @@ def run_backtest(tickers):
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
-            # Trim to last 15 years
-            df = df[df.index >= cutoff_date].copy()
+            df = df[df.index >= cutoff].copy()
             if len(df) < min_bars:
                 continue
 
-            if float(df['Close'].iloc[-1]) < MIN_PRICE:
+            recent_close = float(df['Close'].dropna().iloc[-1])
+            if np.isnan(recent_close) or recent_close < MIN_PRICE:
                 continue
-
-            recent_close = float(df['Close'].iloc[-1])
 
             try:
                 mc = yf.Ticker(ticker).fast_info.market_cap
@@ -347,20 +425,14 @@ def run_backtest(tickers):
             except:
                 pass
 
-            # Compute MACD
             macd_line, signal_line, histogram = compute_macd(df['Close'])
+            rsi_values = compute_rsi(df['Close'], RSI_PERIOD)
 
-            vf_signals, skip_counts = find_vixfix_signals(df, macd_line, signal_line, histogram)
-            total_skipped_nobreak  += skip_counts['skipped_nobreak']
-            total_skipped_stopdist += skip_counts['skipped_stopdist']
-            total_skipped_macd     += skip_counts['skipped_macd']
-
+            vf_signals = find_vixfix_signals(df, macd_line, signal_line, histogram, rsi_values)
             if not vf_signals:
                 continue
 
             stoch_active = find_stoch_signal_bars(df)
-            if not stoch_active:
-                continue
 
             for signal in vf_signals:
                 sidx = signal['signal_idx']
@@ -373,124 +445,119 @@ def run_backtest(tickers):
                 if sidx + 1 >= len(df):
                     continue
 
-                # Price sanity check
                 entry = signal['entry_price']
                 if entry < recent_close * 0.15 or entry > recent_close * 6.0:
-                    print(f'  Skipping {ticker} {signal["signal_date"].date()} — price mismatch (${entry:.2f} vs ${recent_close:.2f})')
                     continue
 
-                trade_short = backtest_signal(df, signal, HOLD_WEEKS_SHORT)
-                trade_long  = backtest_signal(df, signal, HOLD_WEEKS_LONG)
+                signal['ticker'] = ticker
+                signal['date']   = str(signal['signal_date'].date())
 
-                for t in [trade_short, trade_long]:
-                    t['ticker'] = ticker
-                    t['date']   = str(signal['signal_date'].date())
+                for hold in HOLD_PERIODS:
+                    for target in WIN_TARGETS:
+                        # Strategy A
+                        ta = backtest_signal_strategy_a(df, signal, hold, target)
+                        results[('A', hold, target, 'all')].append(ta)
+                        if signal['has_rsi_div']:
+                            results[('A', hold, target, 'rsi')].append(ta)
 
-                all_trades_short.append(trade_short)
-                all_trades_long.append(trade_long)
+                        # Strategy B
+                        tb = backtest_signal_strategy_b(df, signal, hold, target)
+                        if tb is not None:
+                            results[('B', hold, target, 'all')].append(tb)
+                            if signal['has_rsi_div']:
+                                results[('B', hold, target, 'rsi')].append(tb)
 
-                print(
-                    f'  {ticker} {trade_short["date"]} → '
-                    f'{trade_short["result"]:<7} {trade_short["pct_return"]:+.1f}% '
-                    f'(${trade_short["dollar_return"]:+.2f}) | '
-                    f'30w: {trade_long["result"]:<7} {trade_long["pct_return"]:+.1f}%'
-                )
+                print(f'  {ticker} {signal["date"]} RSI:{signal["rsi_path"] or "none"}')
 
         except Exception as e:
             print(f'  Error on {ticker}: {e}')
 
         if (i + 1) % 100 == 0:
-            print(f'  [{i + 1}/{len(tickers)}] — {len(all_trades_short)} signals so far...')
+            print(f'  [{i + 1}/{len(tickers)}] scanned...')
 
         time.sleep(0.05)
 
-    print(f'\nFilter summary:')
-    print(f'  Skipped (no-break violated):  {total_skipped_nobreak}')
-    print(f'  Skipped (stop too wide >11%): {total_skipped_stopdist}')
-    print(f'  Skipped (no MACD divergence): {total_skipped_macd}')
+    return results
 
-    return all_trades_short, all_trades_long
-
-def safe_mean(values):
-    """Mean that handles empty lists and NaN values"""
-    clean = [v for v in values if v is not None and not np.isnan(v)]
-    return np.mean(clean) if clean else 0.0
-
-def summarize(trades, hold_weeks, label):
+def summarize_bucket(trades, label):
     if not trades:
-        return f'No signals found for {label}.'
+        return f'{label}: no signals\n'
 
     wins     = [t for t in trades if t['result'] == 'WIN']
     losses   = [t for t in trades if t['result'] == 'LOSS']
     neutrals = [t for t in trades if t['result'] == 'NEUTRAL']
     total    = len(trades)
 
-    pct_returns    = [t['pct_return'] for t in trades]
-    dollar_returns = [t['dollar_return'] for t in trades]
-    hold_times     = [t['exit_week'] for t in trades if t['exit_week'] is not None]
+    win_rate    = len(wins) / total * 100
+    loss_rate   = len(losses) / total * 100
+    avg_win_pct = safe_mean([t['pct_return'] for t in wins])
+    avg_los_pct = safe_mean([t['pct_return'] for t in losses])
+    exp_value   = (win_rate/100 * avg_win_pct) + (loss_rate/100 * avg_los_pct)
+    total_pnl   = sum(t['dollar_return'] for t in trades if not np.isnan(t['dollar_return']))
+    avg_hold    = safe_mean([t['exit_week'] for t in trades if t['exit_week'] is not None])
 
-    win_rate        = len(wins) / total * 100
-    avg_pct         = safe_mean(pct_returns)
-    avg_win_pct     = safe_mean([t['pct_return'] for t in wins])
-    avg_loss_pct    = safe_mean([t['pct_return'] for t in losses])
-    avg_dollar      = safe_mean(dollar_returns)
-    avg_win_dollar  = safe_mean([t['dollar_return'] for t in wins])
-    avg_loss_dollar = safe_mean([t['dollar_return'] for t in losses])
-    avg_hold        = safe_mean(hold_times)
-    avg_hold_win    = safe_mean([t['exit_week'] for t in wins])
-    avg_hold_loss   = safe_mean([t['exit_week'] for t in losses])
+    return (f'{label}\n'
+            f'  Signals: {total}  Win: {len(wins)} ({win_rate:.1f}%)  '
+            f'Loss: {len(losses)} ({loss_rate:.1f}%)  Neutral: {len(neutrals)}\n'
+            f'  Avg win: {avg_win_pct:+.1f}%  Avg loss: {avg_los_pct:+.1f}%  '
+            f'Expected value: {exp_value:+.2f}%\n'
+            f'  Total P&L: ${total_pnl:+,.2f}  Avg hold: {avg_hold:.1f}w\n')
 
-    total_capital = total * POSITION_SIZE
-    total_profit  = sum(v for v in dollar_returns if not np.isnan(v))
-    total_roi     = (total_profit / total_capital * 100) if total_capital > 0 else 0.0
+def build_report(results):
+    sep  = '=' * 65
+    sep2 = '-' * 65
+    lines = [sep, 'BACKTEST REPORT — FULL COMPARISON', sep, '']
 
-    best_trade  = max(trades, key=lambda t: t['dollar_return'] if not np.isnan(t['dollar_return']) else -999999)
-    worst_trade = min(trades, key=lambda t: t['dollar_return'] if not np.isnan(t['dollar_return']) else 999999)
+    # Section 1: Strategy A vs B comparison (13% target, 15w hold)
+    lines.append('── STRATEGY A vs B (13% target, 15-week hold) ─────────────')
+    lines.append(summarize_bucket(results[('A', 15, 0.13, 'all')], 'Strategy A — buy at trigger close'))
+    lines.append(summarize_bucket(results[('B', 15, 0.13, 'all')], 'Strategy B — buy on pullback to trigger close'))
 
-    sep = '=' * 58
-    lines = [
-        sep,
-        f'BACKTEST REPORT — {label}',
-        f'BB + VixFix + Stochastic + MACD Divergence | $5,000/trade',
-        f'Max hold: {hold_weeks} weeks | Last {YEARS_HISTORY} years of data',
-        sep,
-        f'Total signals:        {total}',
-        f'Wins  (>+13%):        {len(wins)} ({win_rate:.1f}%)',
-        f'Losses (stop hit):    {len(losses)} ({len(losses)/total*100:.1f}%)',
-        f'Neutral ({hold_weeks}w hold):   {len(neutrals)} ({len(neutrals)/total*100:.1f}%)',
-        '',
-        '── Per Trade ───────────────────────────────────────────',
-        f'Avg return:           {avg_pct:+.1f}%  (${avg_dollar:+,.2f})',
-        f'Avg win:              {avg_win_pct:+.1f}%  (${avg_win_dollar:+,.2f})',
-        f'Avg loss:             {avg_loss_pct:+.1f}%  (${avg_loss_dollar:+,.2f})',
-        '',
-        '── Hold Times ──────────────────────────────────────────',
-        f'Avg hold (all):       {avg_hold:.1f} weeks',
-        f'Avg hold (wins):      {avg_hold_win:.1f} weeks',
-        f'Avg hold (losses):    {avg_hold_loss:.1f} weeks',
-        '',
-        '── Overall P&L ─────────────────────────────────────────',
-        f'Total capital:        ${total_capital:,.2f}',
-        f'Total profit/loss:    ${total_profit:+,.2f}',
-        f'Overall ROI:          {total_roi:+.1f}%',
-        '',
-        f'Best:   {best_trade["ticker"]} {best_trade["date"]} ({best_trade["pct_return"]:+.1f}%  ${best_trade["dollar_return"]:+,.2f})',
-        f'Worst:  {worst_trade["ticker"]} {worst_trade["date"]} ({worst_trade["pct_return"]:+.1f}%  ${worst_trade["dollar_return"]:+,.2f})',
-        '',
-        sep,
-        f'ALL SIGNALS — {label}',
-        sep,
-        f'{"Ticker":<6} {"Date":<12} {"Result":<8} {"Ret%":>7} {"$Ret":>10} {"Wk":>4} {"Entry":>8} {"Stop":>8}',
-        '-' * 58,
-    ]
+    # Section 2: Hold period comparison (Strategy A, 13% target)
+    lines.append(sep2)
+    lines.append('── HOLD PERIOD COMPARISON — Strategy A, 13% target ────────')
+    for hold in HOLD_PERIODS:
+        lines.append(summarize_bucket(results[('A', hold, 0.13, 'all')], f'  {hold}-week hold'))
 
-    for t in sorted(trades, key=lambda x: x['date']):
-        ret_str  = f'{t["pct_return"]:+.1f}%' if not np.isnan(t["pct_return"]) else 'nan'
-        dret_str = f'${t["dollar_return"]:+,.2f}' if not np.isnan(t["dollar_return"]) else 'nan'
+    # Section 3: Win target comparison (Strategy A, 15w hold)
+    lines.append(sep2)
+    lines.append('── WIN TARGET COMPARISON — Strategy A, 15-week hold ────────')
+    for target in WIN_TARGETS:
+        lines.append(summarize_bucket(results[('A', 15, target, 'all')], f'  {int(target*100)}% target'))
+
+    # Section 4: RSI filter impact (Strategy A, 13% target, 15w hold)
+    lines.append(sep2)
+    lines.append('── RSI DIVERGENCE FILTER IMPACT — Strategy A, 13%, 15w ─────')
+    lines.append(summarize_bucket(results[('A', 15, 0.13, 'all')],  '  Without RSI filter (all signals)'))
+    lines.append(summarize_bucket(results[('A', 15, 0.13, 'rsi')],  '  With RSI filter (divergence required)'))
+
+    # Section 5: Best overall combinations (by expected value)
+    lines.append(sep2)
+    lines.append('── TOP 5 COMBINATIONS BY EXPECTED VALUE ───────────────────')
+    scored = []
+    for key, trades in results.items():
+        if not trades:
+            continue
+        strategy, hold, target, rsi_f = key
+        wins   = [t for t in trades if t['result'] == 'WIN']
+        losses = [t for t in trades if t['result'] == 'LOSS']
+        total  = len(trades)
+        if total < 5:
+            continue
+        wr     = len(wins) / total * 100
+        lr     = len(losses) / total * 100
+        aw     = safe_mean([t['pct_return'] for t in wins])
+        al     = safe_mean([t['pct_return'] for t in losses])
+        ev     = (wr/100 * aw) + (lr/100 * al)
+        pnl    = sum(t['dollar_return'] for t in trades if not np.isnan(t['dollar_return']))
+        scored.append((ev, pnl, strategy, hold, target, rsi_f, total, wr))
+
+    scored.sort(reverse=True)
+    for ev, pnl, strategy, hold, target, rsi_f, total, wr in scored[:5]:
+        rsi_label = 'RSI required' if rsi_f == 'rsi' else 'no RSI filter'
         lines.append(
-            f'{t["ticker"]:<6} {t["date"]:<12} {t["result"]:<8} '
-            f'{ret_str:>7} {dret_str:>10} '
-            f'{str(t["exit_week"])+"w":>4}  ${t["entry"]:>7.2f}  ${t["stop_loss"]:>7.2f}'
+            f'  Strategy {strategy} | {hold}w | {int(target*100)}% | {rsi_label}\n'
+            f'    EV: {ev:+.2f}%  Win: {wr:.1f}%  P&L: ${pnl:+,.2f}  Signals: {total}\n'
         )
 
     lines.append(sep)
@@ -512,32 +579,8 @@ def send_email(report):
 
 if __name__ == '__main__':
     tickers = get_all_tickers()
-    trades_short, trades_long = run_backtest(tickers)
-
-    report_short = summarize(trades_short, HOLD_WEEKS_SHORT, f'{HOLD_WEEKS_SHORT}-WEEK HOLD')
-    report_long  = summarize(trades_long,  HOLD_WEEKS_LONG,  f'{HOLD_WEEKS_LONG}-WEEK HOLD')
-
-    sep = '=' * 58
-    if trades_short and trades_long:
-        wr_short  = len([t for t in trades_short if t['result'] == 'WIN']) / len(trades_short) * 100
-        wr_long   = len([t for t in trades_long  if t['result'] == 'WIN']) / len(trades_long)  * 100
-        pnl_short = sum(t['dollar_return'] for t in trades_short if not np.isnan(t['dollar_return']))
-        pnl_long  = sum(t['dollar_return'] for t in trades_long  if not np.isnan(t['dollar_return']))
-        comparison = '\n'.join([
-            sep,
-            '15-WEEK vs 30-WEEK HOLD COMPARISON',
-            sep,
-            f'{"Metric":<28} {"15 Weeks":>12} {"30 Weeks":>12}',
-            '-' * 54,
-            f'{"Win rate":<28} {wr_short:>11.1f}% {wr_long:>11.1f}%',
-            f'{"Total P&L":<28} ${pnl_short:>+11,.2f} ${pnl_long:>+11,.2f}',
-            f'{"Total signals":<28} {len(trades_short):>12} {len(trades_long):>12}',
-            sep,
-        ])
-    else:
-        comparison = 'Not enough data for comparison.'
-
-    full_report = comparison + '\n\n' + report_short + '\n\n' + report_long
-    print('\n' + full_report)
+    results = run_backtest(tickers)
+    report  = build_report(results)
+    print('\n' + report)
     if GMAIL_USER:
-        send_email(full_report)
+        send_email(report)
