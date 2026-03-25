@@ -3,7 +3,7 @@
 #
 # Run these to refresh backtest_stats.json, which the scanners read.
 # Both backtest jobs can be triggered at the same time — the commit step
-# pulls before pushing and retries on collision so they won't conflict.
+# stages first, then pulls with rebase, then pushes with retry.
 #
 # After both finish, trigger scanner.yml manually if you want fresh
 # scan results immediately. Scheduled scans will pick up the new stats
@@ -43,9 +43,13 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
           git add backtest_stats.json
-          git diff --cached --quiet || git commit -m "Update weekly backtest stats [skip ci]"
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git stash
+          git pull --rebase origin main
+          git stash pop
+          git add backtest_stats.json
+          git commit -m "Update weekly backtest stats [skip ci]"
           for i in 1 2 3; do
             git push && break
             echo "Push attempt $i failed, pulling and retrying..."
@@ -73,9 +77,13 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
           git add backtest_stats.json
-          git diff --cached --quiet || git commit -m "Update daily backtest stats [skip ci]"
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git stash
+          git pull --rebase origin main
+          git stash pop
+          git add backtest_stats.json
+          git commit -m "Update daily backtest stats [skip ci]"
           for i in 1 2 3; do
             git push && break
             echo "Push attempt $i failed, pulling and retrying..."
