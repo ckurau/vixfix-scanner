@@ -41,8 +41,7 @@ MACD_SIGNAL    = 9
 
 HOLD_BARS      = 20
 WIN_TARGET     = 0.13
-POSITION_HIGH  = 10000.0   # Tiers 1 & 2 (>80% WR)
-POSITION_STD   = 5000.0    # Tiers 3 / 3B / 3C
+POSITION_HIGH  = 10000.0   # Tiers 1 & 2
 
 MIN_PRICE      = 10.0
 MIN_MARKET_CAP = 1_000_000_000
@@ -182,96 +181,6 @@ def find_stoch_active_set(df):
         active.add(i)
     return active
 
-def find_stoch_signals(df):
-    close, high, low, open_ = df['Close'], df['High'], df['Low'], df['Open']
-    cv, lv = close.values, low.values
-    n = len(df)
-    bb_lo = close.rolling(BB_LENGTH).mean() - BB_MULT * close.rolling(BB_LENGTH).std(ddof=0)
-    trig  = (close > open_) & (low <= bb_lo)
-    vp    = (trig.shift(1).fillna(False) & (close > open_)
-             & (open_ >= open_.shift(1)) & (close >= open_.shift(1)))
-    ll    = low.rolling(STOCH_K).min()
-    hh    = high.rolling(STOCH_K).max()
-    sk    = 100 * (close - ll) / (hh - ll)
-    sd    = ((low < low.shift(1).rolling(STOCH_LOOKBACK).min())
-             & (sk > sk.shift(1).rolling(STOCH_LOOKBACK).min()))
-    tlo   = low.where(trig).ffill()
-    nb    = low.rolling(LOOKBACK).min() >= tlo
-    bhl   = close <= 0.85 * high.rolling(YEAR_HIGH_BARS).max()
-    vpv, sdv, nbv, bhlv, tv = vp.values, sd.values, nb.values, bhl.values, trig.values
-    sigs = []
-    for i in range(LOOKBACK, n - 1):
-        if not nbv[i] or not bhlv[i]: continue
-        if not any(vpv[max(0, i - LOOKBACK):i]): continue
-        if not any(sdv[max(0, i - LOOKBACK):i]): continue
-        ti = next((k for k in range(i, max(i - LOOKBACK, -1), -1) if tv[k]), None)
-        if ti is None: continue
-        e, s = cv[ti], lv[ti]
-        if np.isnan(e) or np.isnan(s): continue
-        if (e - s) / e > MAX_STOP_DIST: continue
-        if sigs and sigs[-1]['signal_idx'] == ti: continue
-        sigs.append({'signal_idx': ti, 'signal_date': df.index[ti],
-                     'entry_price': float(e), 'stop_loss': float(s)})
-    return sigs
-
-def find_bb_only_signals(df):
-    close, low, open_ = df['Close'], df['Low'], df['Open']
-    cv, lv = close.values, low.values
-    n = len(df)
-    bb_lo = close.rolling(BB_LENGTH).mean() - BB_MULT * close.rolling(BB_LENGTH).std(ddof=0)
-    trig  = (close > open_) & (low <= bb_lo)
-    tc    = (trig & (close.shift(-1) > open_.shift(-1))
-                  & (open_.shift(-1) >= open_)
-                  & (close.shift(-1) >= open_))
-    tlo   = low.where(trig).ffill()
-    nb    = low.rolling(LOOKBACK).min() >= tlo
-    tcv, nbv = tc.values, nb.values
-    sigs = []
-    for i in range(LOOKBACK, n - 1):
-        if not tcv[i] or not nbv[i]: continue
-        e, s = cv[i], lv[i]
-        if np.isnan(e) or np.isnan(s): continue
-        if (e - s) / e > MAX_STOP_DIST: continue
-        sigs.append({'signal_idx': i, 'signal_date': df.index[i],
-                     'entry_price': float(e), 'stop_loss': float(s)})
-    return sigs
-
-def find_stoch_macd_signals(df):
-    close, high, low, open_ = df['Close'], df['High'], df['Low'], df['Open']
-    cv, lv = close.values, low.values
-    n = len(df)
-    bb_lo = close.rolling(BB_LENGTH).mean() - BB_MULT * close.rolling(BB_LENGTH).std(ddof=0)
-    trig  = (close > open_) & (low <= bb_lo)
-    vp    = (trig.shift(1).fillna(False) & (close > open_)
-             & (open_ >= open_.shift(1)) & (close >= open_.shift(1)))
-    ll    = low.rolling(STOCH_K).min()
-    hh    = high.rolling(STOCH_K).max()
-    sk    = 100 * (close - ll) / (hh - ll)
-    sd    = ((low < low.shift(1).rolling(STOCH_LOOKBACK).min())
-             & (sk > sk.shift(1).rolling(STOCH_LOOKBACK).min()))
-    tlo   = low.where(trig).ffill()
-    nb    = low.rolling(LOOKBACK).min() >= tlo
-    bhl   = close <= 0.85 * high.rolling(YEAR_HIGH_BARS).max()
-    ml, sl_a, hist = compute_macd(close)
-    vpv, sdv, nbv, bhlv, tv = vp.values, sd.values, nb.values, bhl.values, trig.values
-    sigs = []
-    for i in range(LOOKBACK + 1, n - 1):
-        if not nbv[i] or not bhlv[i]: continue
-        if not any(vpv[max(0, i - LOOKBACK):i]): continue
-        if not any(sdv[max(0, i - LOOKBACK):i]): continue
-        pi = max(0, i - LOOKBACK)
-        if np.isnan(hist[i]) or np.isnan(hist[pi]): continue
-        if not ((hist[i] > hist[pi]) or (ml[i] > ml[pi]) or (sl_a[i] > sl_a[pi])): continue
-        ti = next((k for k in range(i, max(i - LOOKBACK, -1), -1) if tv[k]), None)
-        if ti is None: continue
-        e, s = cv[ti], lv[ti]
-        if np.isnan(e) or np.isnan(s): continue
-        if (e - s) / e > MAX_STOP_DIST: continue
-        if sigs and sigs[-1]['signal_idx'] == ti: continue
-        sigs.append({'signal_idx': ti, 'signal_date': df.index[ti],
-                     'entry_price': float(e), 'stop_loss': float(s)})
-    return sigs
-
 # ── Trade evaluation ───────────────────────────────────────────────────────────
 def eval_trade(df, signal, position_size):
     idx, entry, stop = signal['signal_idx'], signal['entry_price'], signal['stop_loss']
@@ -305,7 +214,7 @@ def run_backtest(tickers):
     cutoff   = pd.Timestamp.now() - pd.DateOffset(years=YEARS_HISTORY)
     min_bars = max(VF_LB + MAX_GAP,
                    YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + HOLD_BARS + 10
-    results  = {k: [] for k in ['ultra', 'high', 'standard', 'bb_only', 'stoch_macd']}
+    results  = {k: [] for k in ['ultra', 'high']}
     print(f'Backtesting {len(tickers)} tickers '
           f'({YEARS_HISTORY}yr, {INTERVAL}, {HOLD_BARS}-bar hold, {int(WIN_TARGET*100)}% target)...')
 
@@ -341,30 +250,6 @@ def run_backtest(tickers):
                 if t is None: continue
                 if sig['has_macd'] and has_stoch: results['ultra'].append(t)
                 if has_stoch:                     results['high'].append(t)
-
-            for sig in find_stoch_signals(df):
-                si, e = sig['signal_idx'], sig['entry_price']
-                if e < rc * 0.15 or e > rc * 6.0: continue
-                if si + 1 >= len(df): continue
-                sig['ticker'] = ticker
-                t = eval_trade(df, sig, POSITION_STD)
-                if t: results['standard'].append(t)
-
-            for sig in find_bb_only_signals(df):
-                si, e = sig['signal_idx'], sig['entry_price']
-                if e < rc * 0.15 or e > rc * 6.0: continue
-                if si + 1 >= len(df): continue
-                sig['ticker'] = ticker
-                t = eval_trade(df, sig, POSITION_STD)
-                if t: results['bb_only'].append(t)
-
-            for sig in find_stoch_macd_signals(df):
-                si, e = sig['signal_idx'], sig['entry_price']
-                if e < rc * 0.15 or e > rc * 6.0: continue
-                if si + 1 >= len(df): continue
-                sig['ticker'] = ticker
-                t = eval_trade(df, sig, POSITION_STD)
-                if t: results['stoch_macd'].append(t)
 
         except Exception as ex:
             print(f'  Error {ticker}: {ex}')
@@ -481,21 +366,17 @@ def build_report(results, spy_annual=None):
     sep2 = '-' * 80
 
     tiers = [
-        ('ultra',      POSITION_HIGH, 'TIER 1 ★★★ ULTRA    (BB+VixFix+MACD+Stoch)'),
-        ('high',       POSITION_HIGH, 'TIER 2 ★★  HIGH     (BB+VixFix+Stoch)      '),
-        ('standard',   POSITION_STD,  'TIER 3 ★   STANDARD (BB+Stoch)             '),
-        ('bb_only',    POSITION_STD,  'TIER 3B ★  STD-BB   (BB Trigger only)      '),
-        ('stoch_macd', POSITION_STD,  'TIER 3C ★  STD-MACD (BB+Stoch+MACD)       '),
+        ('ultra', POSITION_HIGH, 'TIER 1 ★★★ ULTRA    (BB+VixFix+MACD+Stoch)'),
+        ('high',  POSITION_HIGH, 'TIER 2 ★★  HIGH     (BB+VixFix+Stoch)      '),
     ]
 
     lines = [
         sep,
         f'BACKTEST REPORT — {INTERVAL.upper()}  |  {YEARS_HISTORY} years  |  '
-        f'{HOLD_BARS}-{BAR_LABEL} hold  |  {int(WIN_TARGET*100)}% win target',
+        f'{HOLD_BARS}-{BAR_LABEL} hold  |  {int(WIN_TARGET*100)}% win target  |  Tiers 1 & 2 only',
         sep,
         f'  Entry: close of BB trigger candle | Stop: low of BB trigger candle',
-        f'  Position: ${POSITION_HIGH:,.0f} (Tiers 1 & 2, >80% WR) | '
-        f'${POSITION_STD:,.0f} (Tiers 3/3B/3C)',
+        f'  Position: ${POSITION_HIGH:,.0f}/trade (both tiers)',
         f'  Filters: Price >${MIN_PRICE:.0f} | Mkt cap >$1B | Stop dist <{int(MAX_STOP_DIST*100)}%',
         f'  ExpVal = (Win% × Avg Win%) + (Loss% × Avg Loss%)',
         f'  ROI = Total P&L ÷ (Signals × Position Size)',
