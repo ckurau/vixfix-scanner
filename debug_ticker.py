@@ -25,6 +25,9 @@ MIN_MARKET_CAP = 1_000_000_000
 MAX_STOP_DIST  = 0.11
 NO_BREAK_BARS  = 10
 
+WIN_TARGET     = 0.13
+POSITION_SIZE  = 10_000.0
+
 # ── Change this to any ticker you want to debug ────────────────────────────────
 TICKER = 'VERX'
 
@@ -45,11 +48,12 @@ def no_break_before(low_values, idx, n_bars):
     return True, None, None
 
 def run_debug(ticker):
-    print(f'\n{"="*60}')
+    sep  = '=' * 60
+    sep2 = '-' * 60
+    print(f'\n{sep}')
     print(f'DEBUG REPORT — {ticker}')
-    print(f'{"="*60}\n')
+    print(f'{sep}\n')
 
-    # Download data
     df = yf.download(ticker, period='3y', interval='1wk', progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -63,7 +67,7 @@ def run_debug(ticker):
     close_v = close.values
     low_v   = low.values
 
-    # ── Step 1: Price and market cap filters ──────────────────────────────────
+    # ── [1] Price filter ──────────────────────────────────────────────────────
     current_price = float(close.iloc[-1])
     print(f'[1] PRICE FILTER')
     print(f'    Current price: ${current_price:.2f} (min ${MIN_PRICE})')
@@ -72,6 +76,7 @@ def run_debug(ticker):
         return
     print(f'    ✓ PASS\n')
 
+    # ── [2] Market cap filter ─────────────────────────────────────────────────
     try:
         mc = yf.Ticker(ticker).fast_info.market_cap
         print(f'[2] MARKET CAP FILTER')
@@ -83,7 +88,7 @@ def run_debug(ticker):
     except:
         print(f'[2] MARKET CAP FILTER — could not retrieve, skipping\n')
 
-    # ── Step 2: Bollinger Bands + Trigger candles ─────────────────────────────
+    # ── [3] BB trigger + confirmation candles ─────────────────────────────────
     bb_mid   = close.rolling(BB_LENGTH).mean()
     bb_std   = close.rolling(BB_LENGTH).std(ddof=0)
     bb_lower = bb_mid - BB_MULT * bb_std
@@ -101,7 +106,7 @@ def run_debug(ticker):
         print(f'    {df.index[idx].date()} — close ${close_v[idx]:.2f}, low ${low_v[idx]:.2f}')
     print()
 
-    # ── Step 3: VixFix ────────────────────────────────────────────────────────
+    # ── [4] VixFix ────────────────────────────────────────────────────────────
     hc       = close.rolling(VF_PD).max()
     wvf      = (hc - low) / hc * 100
     vf_mid   = wvf.rolling(VF_BBL).mean()
@@ -134,7 +139,7 @@ def run_debug(ticker):
         print(f'    {df.index[idx].date()} — close ${close_v[idx]:.2f}, low ${low_v[idx]:.2f}, WVF {wvf_v[idx]:.2f}')
     print()
 
-    # ── Step 4: Find most recent trigger within SCAN_DELAY ───────────────────
+    # ── [5] Most recent trigger within SCAN_DELAY ─────────────────────────────
     print(f'[5] MOST RECENT TRIGGER (within last {SCAN_DELAY} bars)')
     recent_idx = None
     for i in range(n - 1, max(n - SCAN_DELAY - 2, -1), -1):
@@ -144,8 +149,9 @@ def run_debug(ticker):
 
     if recent_idx is None:
         print(f'    ✗ FAIL — no VixFix trigger candle within last {SCAN_DELAY} bars')
-        print(f'    Most recent VixFix trigger was: {df.index[vf_trigger_bars[-1]].date() if vf_trigger_bars else "none"}')
-        print(f'    That was {n - 1 - vf_trigger_bars[-1] if vf_trigger_bars else "?"} bars ago')
+        if vf_trigger_bars:
+            bars_ago = n - 1 - vf_trigger_bars[-1]
+            print(f'    Most recent VixFix trigger: {df.index[vf_trigger_bars[-1]].date()} ({bars_ago} bars ago)')
         return
     print(f'    ✓ Found at {df.index[recent_idx].date()} — close ${close_v[recent_idx]:.2f}, low ${low_v[recent_idx]:.2f}\n')
 
@@ -153,36 +159,35 @@ def run_debug(ticker):
     recent_close = close_v[recent_idx]
     recent_wvf   = wvf_v[recent_idx]
 
-    # ── Step 5: No-break before trigger ──────────────────────────────────────
+    # ── [6] No-break before trigger ───────────────────────────────────────────
     print(f'[6] NO-BREAK RULE (no prior {NO_BREAK_BARS} candles can have lower low than trigger)')
     ok, fail_j, fail_low = no_break_before(low_v, recent_idx, NO_BREAK_BARS)
+    nobreak_pass = ok
     if not ok:
         print(f'    ✗ FAIL — candle at {df.index[fail_j].date()} had low ${fail_low:.2f}')
         print(f'             which is below trigger low ${recent_low:.2f}')
-        print(f'    → This is likely why {ticker} is not showing in scanner')
-        print(f'    → The {NO_BREAK_BARS} bars before trigger: ')
         start = max(0, recent_idx - NO_BREAK_BARS)
         for j in range(start, recent_idx):
             flag = ' ← VIOLATES' if low_v[j] < recent_low else ''
             print(f'      {df.index[j].date()} low ${low_v[j]:.2f}{flag}')
-        print()
     else:
         print(f'    ✓ PASS\n')
 
-    # ── Step 6: Stop distance ─────────────────────────────────────────────────
+    # ── [7] Stop distance ─────────────────────────────────────────────────────
     stop_dist = (recent_close - recent_low) / recent_close
     print(f'[7] STOP DISTANCE FILTER (max {MAX_STOP_DIST*100:.0f}%)')
     print(f'    Entry: ${recent_close:.2f}, Stop: ${recent_low:.2f}')
     print(f'    Distance: {stop_dist*100:.1f}%')
-    if stop_dist > MAX_STOP_DIST:
-        print(f'    ✗ FAIL — stop is more than {MAX_STOP_DIST*100:.0f}% below entry')
-        print(f'    → This is likely why {ticker} is not showing in scanner\n')
+    stop_pass = stop_dist <= MAX_STOP_DIST
+    if not stop_pass:
+        print(f'    ✗ FAIL — stop is more than {MAX_STOP_DIST*100:.0f}% below entry\n')
     else:
         print(f'    ✓ PASS\n')
 
-    # ── Step 7: VixFix divergence ─────────────────────────────────────────────
+    # ── [8] VixFix divergence ─────────────────────────────────────────────────
     print(f'[8] VIXFIX DIVERGENCE (lower low + higher WVF vs prior trigger)')
-    found_div = False
+    found_vf_div = False
+    prior_vf_idx = None
     for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
         if not twvf[j]:
             continue
@@ -194,18 +199,19 @@ def run_debug(ticker):
         print(f'      Price: ${recent_low:.2f} vs ${prior_low:.2f} — lower low: {recent_low < prior_low}')
         print(f'      WVF:   {recent_wvf:.2f} vs {prior_wvf:.2f} — higher WVF: {recent_wvf > prior_wvf}')
         if recent_low < prior_low and recent_wvf > prior_wvf:
-            found_div = True
+            found_vf_div = True
+            prior_vf_idx = j
             print(f'    ✓ VixFix divergence CONFIRMED\n')
         else:
-            print(f'    ✗ VixFix divergence NOT met')
-            print(f'    → This is likely why {ticker} is not showing in scanner\n')
+            print(f'    ✗ VixFix divergence NOT met\n')
         break
 
-    if not found_div and not any(twvf[max(recent_idx - MAX_GAP, 0):recent_idx]):
+    if not found_vf_div and not any(twvf[max(recent_idx - MAX_GAP, 0):recent_idx]):
         print(f'    ✗ FAIL — no prior VixFix trigger found within {MAX_GAP} bars\n')
 
-    # ── Step 8: MACD divergence ───────────────────────────────────────────────
+    # ── [9] MACD divergence ───────────────────────────────────────────────────
     macd_line, signal_line, histogram = compute_macd(close)
+    found_macd_div = False
 
     print(f'[9] MACD DIVERGENCE (Type A: histogram, or Type B: MACD/Signal line)')
     for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
@@ -228,13 +234,13 @@ def run_debug(ticker):
         print(f'    Type B (Signal):    {sig_recent:.4f} vs {sig_prior:.4f} — higher: {sig_recent > sig_prior}')
 
         if type_a or type_b:
+            found_macd_div = True
             print(f'    ✓ MACD divergence CONFIRMED ({"Type A" if type_a else "Type B"})\n')
         else:
-            print(f'    ✗ FAIL — no MACD divergence (neither histogram nor line/signal higher)')
-            print(f'    → This is likely why {ticker} is not showing in scanner\n')
+            print(f'    ✗ FAIL — no MACD divergence\n')
         break
 
-    # ── Step 9: Stochastic scan ───────────────────────────────────────────────
+    # ── [10] Stochastic scan ──────────────────────────────────────────────────
     print(f'[10] STOCHASTIC DIVERGENCE SCAN')
     trigger_v    = trigger.values
     lowest_low   = low.rolling(STOCH_K).min()
@@ -269,20 +275,59 @@ def run_debug(ticker):
     else:
         print(f'    ✗ FAIL — {ticker} does not qualify for Stochastic scan\n')
 
-    # ── Final verdict ─────────────────────────────────────────────────────────
-    print('=' * 60)
-    print('FINAL VERDICT')
-    print('=' * 60)
-    if ok and stop_dist <= MAX_STOP_DIST and found_div:
-        print(f'VixFix scan: likely PASSES all conditions')
+    # ── TIER VERDICT + TRADE LEVELS ───────────────────────────────────────────
+    all_filters_pass = nobreak_pass and stop_pass and found_vf_div
+
+    if all_filters_pass and found_macd_div and stoch_pass:
+        tier = 'TIER 1 ★★★ ULTRA  (BB + VixFix + MACD + Stoch)'
+        position = POSITION_SIZE
+    elif all_filters_pass and stoch_pass:
+        tier = 'TIER 2 ★★  HIGH   (BB + VixFix + Stoch — no MACD)'
+        position = POSITION_SIZE
+    elif all_filters_pass:
+        tier = 'VixFix div confirmed but Stochastic not active — no tier signal'
+        position = 0.0
     else:
         fails = []
-        if not ok:            fails.append(f'No-break rule violated')
-        if stop_dist > MAX_STOP_DIST: fails.append(f'Stop distance {stop_dist*100:.1f}% > {MAX_STOP_DIST*100:.0f}%')
-        if not found_div:     fails.append('VixFix divergence not met')
-        print(f'VixFix scan: FAILING due to — {", ".join(fails)}')
-    print(f'Stochastic scan: {"PASSES" if stoch_pass else "FAILS"}')
-    print('=' * 60)
+        if not nobreak_pass: fails.append('no-break rule')
+        if not stop_pass:    fails.append(f'stop dist {stop_dist*100:.1f}% > {MAX_STOP_DIST*100:.0f}%')
+        if not found_vf_div: fails.append('VixFix divergence')
+        tier = f'NO SIGNAL — failing: {", ".join(fails)}'
+        position = 0.0
+
+    print(sep)
+    print('TIER VERDICT')
+    print(sep)
+    print(f'  {tier}')
+    print()
+
+    if position > 0:
+        entry      = recent_close
+        stop       = recent_low
+        target     = entry * (1 + WIN_TARGET)
+        risk_per   = entry - stop          # per share downside
+        reward_per = target - entry        # per share upside
+        rr_ratio   = reward_per / risk_per if risk_per > 0 else 0
+        shares     = int(position / entry)
+        max_loss   = shares * risk_per
+        max_gain   = shares * reward_per
+        stop_pct   = (entry - stop) / entry * 100
+
+        print(sep2)
+        print('TRADE LEVELS')
+        print(sep2)
+        print(f'  Buy at:        ${entry:.2f}  '
+              f'(close of BB trigger candle — enter at next session open)')
+        print(f'  Stop loss:     ${stop:.2f}  ({stop_pct:.1f}% below entry)')
+        print(f'  Win target:    ${target:.2f}  (+{int(WIN_TARGET*100)}% above entry)')
+        print(f'  Risk/Reward:   1 : {rr_ratio:.2f}  '
+              f'(risk ${risk_per:.2f}/share to make ${reward_per:.2f}/share)')
+        print(f'  Position:      ${position:,.0f} → {shares} shares @ ${entry:.2f}')
+        print(f'  Max loss:      -${max_loss:,.2f}  (if stopped out)')
+        print(f'  Max gain:      +${max_gain:,.2f}  (if target hit)')
+        print(sep)
+    else:
+        print(sep)
 
 if __name__ == '__main__':
     run_debug(TICKER)
