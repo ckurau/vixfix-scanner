@@ -259,25 +259,6 @@ def run_backtest(tickers):
 
     return results
 
-# ── SPY annual returns ─────────────────────────────────────────────────────────
-def get_spy_annual_returns(years_back=YEARS_HISTORY):
-    try:
-        spy = yf.download('SPY', period='max', interval='1mo',
-                          progress=False, auto_adjust=True)
-        if isinstance(spy.columns, pd.MultiIndex):
-            spy.columns = spy.columns.get_level_values(0)
-        cutoff_yr = pd.Timestamp.now().year - years_back
-        annual = {}
-        for yr, grp in spy.groupby(spy.index.year):
-            if yr < cutoff_yr or len(grp) < 2: continue
-            ret = (float(grp['Close'].iloc[-1]) - float(grp['Close'].iloc[0])) \
-                  / float(grp['Close'].iloc[0]) * 100
-            annual[yr] = ret
-        return annual
-    except Exception as e:
-        print(f'SPY fetch error: {e}')
-        return {}
-
 # ── Stats helpers ──────────────────────────────────────────────────────────────
 def bucket_stats(trades, position_size):
     if not trades: return None
@@ -300,15 +281,6 @@ def bucket_stats(trades, position_size):
 def signals_per_month(trades, years=YEARS_HISTORY):
     return len(trades) / (years * 12) if years > 0 else 0.0
 
-def yearly_stats(trades, position_size):
-    by_year = {}
-    for t in trades:
-        yr = t.get('year', 0)
-        by_year.setdefault(yr, []).append(t)
-    return {yr: bucket_stats(tlist, position_size)
-            for yr, tlist in sorted(by_year.items())
-            if bucket_stats(tlist, position_size)}
-
 # ── Report builders ────────────────────────────────────────────────────────────
 def tier_summary_block(label, s, spm):
     if s is None: return f'  {label}: no signals\n'
@@ -320,30 +292,6 @@ def tier_summary_block(label, s, spm):
             f'    Avg win:{s["aw"]:>+7.1f}%  Avg loss:{s["al"]:>+7.1f}%  '
             f'EV:{s["ev"]:>+6.2f}%  Avg hold:{s["hold_b"]:.1f}{bl}\n'
             f'    Total P&L: ${s["pnl"]:>+13,.2f}  ROI:{s["roi"]:>+7.1f}%\n')
-
-def yearly_table(tier_label, yr_stats, spy_annual):
-    if not yr_stats: return f'  {tier_label}: no yearly data\n'
-    sep = '-' * 72
-    rows = [
-        f'  {tier_label}',
-        f'  {"Year":<6} {"Sigs":>5} {"Win%":>6} {"P&L":>14} '
-        f'{"ROI%":>7}  {"SPY%":>7}  {"vs SPY":>8}',
-        f'  {sep}',
-    ]
-    for yr in sorted(yr_stats):
-        s   = yr_stats[yr]
-        spy = spy_annual.get(yr)
-        spy_str = f'{spy:>+6.1f}%' if spy is not None else '    N/A'
-        vs_str  = f'{s["roi"] - spy:>+6.1f}%' if spy is not None else '    N/A'
-        rows.append(
-            f'  {yr:<6} {s["total"]:>5} {s["wr"]:>5.1f}% '
-            f'${s["pnl"]:>+13,.0f} {s["roi"]:>+6.1f}%  {spy_str}  {vs_str}'
-        )
-    rows.append(f'  {sep}')
-    total_pnl = sum(v['pnl']   for v in yr_stats.values())
-    total_sig = sum(v['total'] for v in yr_stats.values())
-    rows.append(f'  {"TOTAL":<6} {total_sig:>5}  Cumulative P&L: ${total_pnl:>+12,.0f}')
-    return '\n'.join(rows) + '\n'
 
 def trade_history_block(trades, label):
     if not trades: return f'{label}: no signals\n'
@@ -360,8 +308,42 @@ def trade_history_block(trades, label):
         )
     return '\n'.join(lines) + '\n'
 
-def build_report(results, spy_annual=None):
-    if spy_annual is None: spy_annual = {}
+def write_stats_json(results, stats_path='backtest_stats.json'):
+    """Write tier stats to JSON so scanners can read them without re-running the backtest."""
+    import json, os
+    tiers = [('ultra', POSITION_HIGH), ('high', POSITION_HIGH)]
+    weekly_stats = {}
+    for key, pos in tiers:
+        s = bucket_stats(results[key], pos)
+        spm = signals_per_month(results[key])
+        if s:
+            weekly_stats[key] = {
+                'total': s['total'], 'wins': s['wins'], 'losses': s['losses'],
+                'neutral': s['neutral'], 'wr': round(s['wr'], 2),
+                'lr': round(s['lr'], 2), 'aw': round(s['aw'], 2),
+                'al': round(s['al'], 2), 'ev': round(s['ev'], 2),
+                'pnl': round(s['pnl'], 2), 'roi': round(s['roi'], 2),
+                'hold_b': round(s['hold_b'], 1), 'spm': round(spm, 2),
+                'interval': INTERVAL, 'hold_bars': HOLD_BARS,
+                'win_target': WIN_TARGET, 'position': pos,
+            }
+        else:
+            weekly_stats[key] = None
+
+    # Merge with existing file so daily stats aren't overwritten
+    existing = {}
+    if os.path.exists(stats_path):
+        try:
+            with open(stats_path) as f:
+                existing = json.load(f)
+        except: pass
+    existing['weekly'] = weekly_stats
+    existing['_note'] = 'Auto-generated. Run backtests via workflow_dispatch to refresh.'
+    with open(stats_path, 'w') as f:
+        json.dump(existing, f, indent=2)
+    print(f'Stats written to {stats_path}')
+
+def build_report(results):
     sep  = '=' * 80
     sep2 = '-' * 80
 
@@ -388,19 +370,6 @@ def build_report(results, spy_annual=None):
         spm = signals_per_month(results[key])
         lines.append(tier_summary_block(f'{lbl} | ${pos:,.0f}/trade', s, spm))
 
-    # ── Year-by-year vs SPY ────────────────────────────────────────────────────
-    lines += [
-        '', sep2,
-        '── YEAR-BY-YEAR PERFORMANCE vs SPY ─────────────────────────────────────────────',
-        '   ROI  = tier P&L ÷ capital deployed that year',
-        '   SPY% = SPY annual price return (buy-and-hold)',
-        '   vs SPY = tier ROI% minus SPY%  (positive = outperformed)',
-        '',
-    ]
-    for key, pos, lbl in tiers:
-        ys = yearly_stats(results[key], pos)
-        lines.append(yearly_table(lbl.strip(), ys, spy_annual))
-
     # ── Trade histories ────────────────────────────────────────────────────────
     lines += ['', sep2]
     for key, pos, lbl in tiers:
@@ -426,10 +395,10 @@ def send_email(subject, report):
         print(f'Email failed: {e}')
 
 if __name__ == '__main__':
-    tickers    = get_all_tickers()
-    results    = run_backtest(tickers)
-    spy_annual = get_spy_annual_returns()
-    report     = build_report(results, spy_annual)
+    tickers = get_all_tickers()
+    results = run_backtest(tickers)
+    write_stats_json(results)
+    report  = build_report(results)
     print('\n' + report)
     if GMAIL_USER:
         send_email(f'Backtest Report — {INTERVAL.upper()} — {HOLD_BARS}-{BAR_LABEL} hold', report)
