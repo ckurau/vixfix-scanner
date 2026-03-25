@@ -580,11 +580,11 @@ def _tier_html(tier_name, title, description, tickers_this_tier,
     else:
         pos_note = f'${pos_size:,.0f}/trade'
 
-    if wr is not None:
-        wr_str = (f'<strong>{wr:.1f}%</strong> win rate &nbsp;|&nbsp; '
-                  f'{n_sigs} signals over {YEARS_HISTORY}yr &nbsp;|&nbsp; ~{spm:.1f}/mo')
+    if wr is not None and n_sigs > 0:
+        wr_str = (f'<strong>{wr:.1f}%</strong> win rate at {int(WIN_TARGET*100)}% target &nbsp;|&nbsp; '
+                  f'{n_sigs} signals found in sample &nbsp;|&nbsp; ~{spm:.1f}/mo')
     else:
-        wr_str = 'Run backtest to determine win rate'
+        wr_str = 'No signals found in backtest sample — run backtest_daily.py for full results'
 
     best_ev_str = ''
     if best_tgt is not None and best_tgt_wr is not None and best_ev is not None:
