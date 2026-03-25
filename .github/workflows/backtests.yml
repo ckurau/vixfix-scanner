@@ -1,0 +1,112 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# BACKTESTS WORKFLOW — manual dispatch only
+#
+# Run these to refresh backtest_stats.json, which the scanners read.
+# Both backtest jobs can be triggered at the same time — the commit step
+# pulls before pushing and retries on collision so they won't conflict.
+#
+# After both finish, trigger scanner.yml manually if you want fresh
+# scan results immediately. Scheduled scans will pick up the new stats
+# automatically on their next run.
+#
+# Runtimes:
+#   Weekly backtest:     ~30 min
+#   Daily backtest:      ~50 min
+#   Exit optimization:   ~40–45 min
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: Backtests
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+  # ── Weekly backtest ────────────────────────────────────────────────────────
+  backtest-weekly:
+    runs-on: ubuntu-latest
+    name: Backtest — Weekly (1wk, 20-week hold)
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy requests
+      - name: Run weekly backtest
+        run: python backtest.py
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+      - name: Commit updated backtest_stats.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          git add backtest_stats.json
+          git diff --cached --quiet || git commit -m "Update weekly backtest stats [skip ci]"
+          for i in 1 2 3; do
+            git push && break
+            echo "Push attempt $i failed, pulling and retrying..."
+            git pull --rebase origin main
+          done
+
+  # ── Daily backtest ─────────────────────────────────────────────────────────
+  backtest-daily:
+    runs-on: ubuntu-latest
+    name: Backtest — Daily (1d, 60-day hold)
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy requests
+      - name: Run daily backtest
+        run: python backtest_daily.py
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+      - name: Commit updated backtest_stats.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          git add backtest_stats.json
+          git diff --cached --quiet || git commit -m "Update daily backtest stats [skip ci]"
+          for i in 1 2 3; do
+            git push && break
+            echo "Push attempt $i failed, pulling and retrying..."
+            git pull --rebase origin main
+          done
+
+  # ── Exit target optimization ───────────────────────────────────────────────
+  optimize-exits:
+    runs-on: ubuntu-latest
+    name: Optimize Exit Targets (1wk/20w + 1d/60d)
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy requests
+      - name: Run optimization
+        run: python backtest_optimize.py
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+
+  # ── Debug single ticker ────────────────────────────────────────────────────
+  debug:
+    runs-on: ubuntu-latest
+    name: Debug Single Ticker
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy requests
+      - name: Run debug
+        run: python debug_ticker.py
