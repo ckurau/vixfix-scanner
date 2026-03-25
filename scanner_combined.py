@@ -311,12 +311,23 @@ th{{background:#f0f0f0;}}
 </p>
 </body></html>'''
 
-def send_email(subject, html_body):
-    msg = MIMEMultipart('alternative')
+def send_email(subject, html_body, attachment_path=None):
+    msg = MIMEMultipart('mixed')
     msg['From']    = GMAIL_USER
     msg['To']      = TO_EMAIL
     msg['Subject'] = subject
     msg.attach(MIMEText(html_body, 'html'))
+    if attachment_path and os.path.exists(attachment_path):
+        from email.mime.base import MIMEBase
+        from email import encoders
+        with open(attachment_path, 'rb') as f:
+            part = MIMEBase('application',
+                            'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', 'attachment',
+                        filename=os.path.basename(attachment_path))
+        msg.attach(part)
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
             s.login(GMAIL_USER, GMAIL_PASSWORD)
@@ -325,13 +336,76 @@ def send_email(subject, html_body):
     except Exception as e: print(f'Email failed: {e}')
 
 if __name__ == '__main__':
-    tickers  = get_all_tickers()
+    import sys
+    # GITHUB_EVENT_NAME is set by scanner.yml to 'schedule' or 'workflow_dispatch'
+    is_scheduled = os.environ.get('GITHUB_EVENT_NAME') == 'schedule'
+
+    tickers     = get_all_tickers()
     ultra, high = run_scans(tickers)
-    bt_stats = load_backtest_stats()
-    html     = build_html_report(ultra, high, bt_stats)
+    bt_stats    = load_backtest_stats()
+    html        = build_html_report(ultra, high, bt_stats)
+
+    # Build tracker Excel — add new rows only on scheduled runs
+    tracker_path = None
+    try:
+        import importlib.util, sys as _sys
+        spec = importlib.util.spec_from_file_location(
+            'trade_tracker', os.path.join(os.path.dirname(__file__), 'trade_tracker.py'))
+        tt = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tt)
+
+        history = tt.load_history('trade_history.json')
+
+        # Always resolve any open trades first (checks price history)
+        if history:
+            history = tt.resolve_open_trades(history)
+
+        if is_scheduled and (ultra or high):
+            from datetime import date
+            scan_date = date.today().isoformat()
+            new_sigs = []
+            for ticker in ultra:
+                new_sigs.append({'scan_date': scan_date, 'ticker': ticker,
+                                  'strategy': '1WK — Tier 1 Ultra', 'tier': 'Tier 1',
+                                  'interval': '1wk',
+                                  'buy_price': 0.0, 'stop_loss': 0.0})
+            for ticker in set(high) - set(ultra):
+                new_sigs.append({'scan_date': scan_date, 'ticker': ticker,
+                                  'strategy': '1WK — Tier 2 High', 'tier': 'Tier 2',
+                                  'interval': '1wk',
+                                  'buy_price': 0.0, 'stop_loss': 0.0})
+
+            # Fetch actual entry/stop prices from yfinance for each new signal
+            import yfinance as yf
+            for sig in new_sigs:
+                try:
+                    df = yf.download(sig['ticker'], period='5d', interval='1wk',
+                                     progress=False, auto_adjust=True)
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    if len(df) >= 1:
+                        sig['buy_price']  = round(float(df['Close'].iloc[-1]), 4)
+                        sig['stop_loss']  = round(float(df['Low'].iloc[-1]),   4)
+                except Exception as e:
+                    print(f'  Price fetch failed for {sig["ticker"]}: {e}')
+
+            history = tt.add_signals(history, new_sigs)
+            tt.save_history(history, 'trade_history.json')
+            print(f'Added {len(new_sigs)} signals to trade_history.json')
+
+        tracker_path = '/tmp/trade_tracker.xlsx'
+        tt.build_excel(history, tracker_path)
+        print(f'Tracker built: {len(history)} total trades')
+    except Exception as e:
+        print(f'Tracker build failed: {e}')
+
     print(f'\n[Done] ULTRA:{len(ultra)}  HIGH:{len(high)}')
     if GMAIL_USER:
         from datetime import date
-        send_email(f'Weekly Stock Scan (1wk) — {date.today().strftime("%b %d %Y")}', html)
+        send_email(
+            f'Weekly Stock Scan (1wk) — {date.today().strftime("%b %d %Y")}',
+            html,
+            attachment_path=tracker_path
+        )
     else:
         print(html[:1500])
