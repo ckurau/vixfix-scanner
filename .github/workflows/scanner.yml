@@ -1,50 +1,25 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# Stock Scanner Workflows
+# SCHEDULED SCANS WORKFLOW
+# Runs daily/weekly scans on schedule. Also triggered manually for scan-only.
+# Reads backtest_stats.json from the repo (written by backtests.yml).
 #
-# TIMING RATIONALE (all times ET / US Eastern):
-#
-# WEEKLY SCAN (1wk strategy — buy at Monday open):
-#   Signal fires after Friday's weekly close.
-#   yfinance weekly data finalizes by ~5pm ET Friday.
-#   Scan runs at 6:30pm ET Friday (23:30 UTC) — after close, data is ready.
-#   You receive the email by ~7:10pm ET. Buy Monday at market open.
-#
-# DAILY SCAN (1d strategy — buy at next morning's open):
-#   Signal fires after today's daily close (4pm ET).
-#   yfinance daily data finalizes by ~5:30–6pm ET.
-#   Scan runs at 6:30pm ET Mon–Fri (23:30 UTC).
-#   You receive email by ~7:10pm ET.
-#   Buy at next morning's market open.
-#
-# BACKTEST JOBS (manual dispatch only):
-#   Weekly backtest:  ~30 min  → writes backtest_stats.json ["weekly"]
-#   Daily backtest:   ~50 min  → writes backtest_stats.json ["daily_60d"]
-#   Both jobs pull before committing and retry on push conflict, so they are
-#   safe to run at the same time via workflow_dispatch.
-#   Run these first before relying on scanner stats.
-#   Optimization report: ~40–45 min — manual dispatch only.
-#
+# TIMING (ET / US Eastern):
+#   Daily scan:  Mon–Fri 6:30pm ET (23:30 UTC) — buy next morning at open
+#   Weekly scan: Friday 6:30pm ET only          — buy Monday at open
 # ══════════════════════════════════════════════════════════════════════════════
 
 name: Stock Scanners
 
 on:
   schedule:
-    # 6:30pm ET every weekday = 23:30 UTC (ET = UTC-5 in winter, UTC-4 in summer)
-    # Weekly scan filters to Friday only inside the job step.
-    # Daily scan runs every weekday.
     - cron: '30 23 * * 1-5'
   workflow_dispatch:
 
 jobs:
 
-  # ── Weekly scanner — Friday only, after close ─────────────────────────────
   weekly-scan:
     runs-on: ubuntu-latest
     name: Weekly Scan (1wk — buy Monday open)
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
@@ -64,13 +39,9 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
 
-  # ── Daily scanner — Mon–Fri, after close ──────────────────────────────────
   daily-scan:
     runs-on: ubuntu-latest
     name: Daily Scan (1d — buy next morning open)
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
@@ -82,96 +53,3 @@ jobs:
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-
-  # ── Weekly backtest — manual only, writes stats JSON ──────────────────────
-  backtest-weekly:
-    runs-on: ubuntu-latest
-    name: Backtest — Weekly (1wk, 20-week hold)
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install yfinance pandas numpy requests
-      - name: Run weekly backtest
-        run: python backtest.py
-        env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-      - name: Commit updated backtest_stats.json
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
-          git add backtest_stats.json
-          git diff --cached --quiet || git commit -m "Update weekly backtest stats [skip ci]"
-          for i in 1 2 3; do
-            git push && break
-            echo "Push attempt $i failed, pulling and retrying..."
-            git pull --rebase origin main
-          done
-
-  # ── Daily backtest — manual only, writes stats JSON ───────────────────────
-  backtest-daily:
-    runs-on: ubuntu-latest
-    name: Backtest — Daily (1d, 60-day hold)
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install yfinance pandas numpy requests
-      - name: Run daily backtest
-        run: python backtest_daily.py
-        env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-      - name: Commit updated backtest_stats.json
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
-          git add backtest_stats.json
-          git diff --cached --quiet || git commit -m "Update daily backtest stats [skip ci]"
-          for i in 1 2 3; do
-            git push && break
-            echo "Push attempt $i failed, pulling and retrying..."
-            git pull --rebase origin main
-          done
-
-  # ── Exit target optimization — manual only ─────────────────────────────────
-  optimize-exits:
-    runs-on: ubuntu-latest
-    name: Optimize Exit Targets (1wk/20w + 1d/60d)
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install yfinance pandas numpy requests
-      - name: Run optimization
-        run: python backtest_optimize.py
-        env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-
-  # ── Debug single ticker — manual only ─────────────────────────────────────
-  debug:
-    runs-on: ubuntu-latest
-    name: Debug Single Ticker
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install yfinance pandas numpy requests
-      - name: Run debug
-        run: python debug_ticker.py
