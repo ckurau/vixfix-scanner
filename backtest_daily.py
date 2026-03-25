@@ -1,50 +1,29 @@
-# NOTE: This is the DAILY version. Logic is identical to backtest.py.
-# Only INTERVAL, BAR_LABEL, and YEAR_HIGH_BARS differ.
 """
-backtest_daily.py  —  Daily backtest (interval=1d, 20-bar hold)
-Run via workflow_dispatch. Emails full report with year-by-year vs SPY.
-To run weekly version use backtest.py — identical logic, different constants.
+backtest_daily.py  —  Daily (1d) backtest, Tiers 1 & 2 only.
+Compares 20-day, 30-day, and 60-day hold periods side by side.
+15 years of history. Emails plain-text report.
 """
-import requests
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import smtplib
-import time
-import os
+import requests, pandas as pd, numpy as np, yfinance as yf
+import smtplib, time, os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# ══════════════════════════════════════════════════════════════════
-# INTERVAL SETTINGS  (only block that differs in backtest_daily.py)
-# ══════════════════════════════════════════════════════════════════
 INTERVAL       = '1d'
 BAR_LABEL      = 'day'
-YEAR_HIGH_BARS = 252          # 52 weekly bars ≈ 1 year
+YEAR_HIGH_BARS = 252
 YEARS_HISTORY  = 15
-# ══════════════════════════════════════════════════════════════════
 
-BB_LENGTH      = 20
-BB_MULT        = 2.0
-VF_PD          = 30
-VF_BBL         = 20
-VF_MULT        = 2.0
-VF_LB          = 75
-VF_PH          = 0.85
-MAX_GAP        = 35
-SCAN_DELAY     = 5
-VF_NEAR        = 2
-STOCH_LOOKBACK = 25
-STOCH_K        = 14
+BB_LENGTH      = 20;  BB_MULT   = 2.0
+VF_PD          = 30;  VF_BBL    = 20;  VF_MULT = 2.0
+VF_LB          = 75;  VF_PH     = 0.85
+MAX_GAP        = 35;  SCAN_DELAY = 5;  VF_NEAR = 2
+STOCH_LOOKBACK = 25;  STOCH_K   = 14
 LOOKBACK       = 10
-MACD_FAST      = 12
-MACD_SLOW      = 26
-MACD_SIGNAL    = 9
+MACD_FAST      = 12;  MACD_SLOW = 26;  MACD_SIGNAL = 9
 
-HOLD_BARS      = 20
+HOLD_PERIODS   = [20, 30, 60]   # days — compared side by side
 WIN_TARGET     = 0.13
-POSITION_HIGH  = 10000.0   # Tiers 1 & 2 (>80% WR)
-POSITION_STD   = 5000.0    # Tiers 3 / 3B / 3C
+POSITION_HIGH  = 10000.0
 
 MIN_PRICE      = 10.0
 MIN_MARKET_CAP = 1_000_000_000
@@ -78,15 +57,12 @@ def get_all_tickers():
                 if sym.isalpha() and len(sym) <= 4:
                     try:
                         mc = float(str(row.get('marketCap', '0')).replace(',', ''))
-                        if mc > 0 and mc < MIN_MARKET_CAP:
-                            continue
-                    except:
-                        pass
+                        if mc > 0 and mc < MIN_MARKET_CAP: continue
+                    except: pass
                     tickers.append(sym)
-        except Exception as e:
-            print(f'Error fetching {exchange}: {e}')
+        except Exception as e: print(f'Error {exchange}: {e}')
     tickers = list(set(tickers))
-    print(f'Total tickers fetched: {len(tickers)}')
+    print(f'Total tickers: {len(tickers)}')
     return tickers
 
 def compute_macd(close):
@@ -117,7 +93,7 @@ def macd_div(pi, ri, ml, sl, hist):
 def find_vixfix_pairs(df):
     close, low, open_ = df['Close'], df['Low'], df['Open']
     cv, lv = close.values, low.values
-    n      = len(df)
+    n = len(df)
     bb_lo  = close.rolling(BB_LENGTH).mean() - BB_MULT * close.rolling(BB_LENGTH).std(ddof=0)
     trig   = (close > open_) & (low <= bb_lo)
     tc     = (trig & (close.shift(-1) > open_.shift(-1))
@@ -154,8 +130,7 @@ def find_vixfix_pairs(df):
             if np.isnan(pl) or np.isnan(pw): continue
             if not no_break_before(lv, j, NO_BREAK_BARS): continue
             if rl < pl and rw > pw:
-                pairs.append({'signal_idx': ri, 'prior_idx': j,
-                               'signal_date': df.index[ri],
+                pairs.append({'signal_idx': ri, 'signal_date': df.index[ri],
                                'entry_price': float(rc), 'stop_loss': float(rl),
                                'has_macd': macd_div(j, ri, ml, sl, hist)})
                 break
@@ -184,112 +159,22 @@ def find_stoch_active_set(df):
         active.add(i)
     return active
 
-def find_stoch_signals(df):
-    close, high, low, open_ = df['Close'], df['High'], df['Low'], df['Open']
-    cv, lv = close.values, low.values
-    n = len(df)
-    bb_lo = close.rolling(BB_LENGTH).mean() - BB_MULT * close.rolling(BB_LENGTH).std(ddof=0)
-    trig  = (close > open_) & (low <= bb_lo)
-    vp    = (trig.shift(1).fillna(False) & (close > open_)
-             & (open_ >= open_.shift(1)) & (close >= open_.shift(1)))
-    ll    = low.rolling(STOCH_K).min()
-    hh    = high.rolling(STOCH_K).max()
-    sk    = 100 * (close - ll) / (hh - ll)
-    sd    = ((low < low.shift(1).rolling(STOCH_LOOKBACK).min())
-             & (sk > sk.shift(1).rolling(STOCH_LOOKBACK).min()))
-    tlo   = low.where(trig).ffill()
-    nb    = low.rolling(LOOKBACK).min() >= tlo
-    bhl   = close <= 0.85 * high.rolling(YEAR_HIGH_BARS).max()
-    vpv, sdv, nbv, bhlv, tv = vp.values, sd.values, nb.values, bhl.values, trig.values
-    sigs = []
-    for i in range(LOOKBACK, n - 1):
-        if not nbv[i] or not bhlv[i]: continue
-        if not any(vpv[max(0, i - LOOKBACK):i]): continue
-        if not any(sdv[max(0, i - LOOKBACK):i]): continue
-        ti = next((k for k in range(i, max(i - LOOKBACK, -1), -1) if tv[k]), None)
-        if ti is None: continue
-        e, s = cv[ti], lv[ti]
-        if np.isnan(e) or np.isnan(s): continue
-        if (e - s) / e > MAX_STOP_DIST: continue
-        if sigs and sigs[-1]['signal_idx'] == ti: continue
-        sigs.append({'signal_idx': ti, 'signal_date': df.index[ti],
-                     'entry_price': float(e), 'stop_loss': float(s)})
-    return sigs
-
-def find_bb_only_signals(df):
-    close, low, open_ = df['Close'], df['Low'], df['Open']
-    cv, lv = close.values, low.values
-    n = len(df)
-    bb_lo = close.rolling(BB_LENGTH).mean() - BB_MULT * close.rolling(BB_LENGTH).std(ddof=0)
-    trig  = (close > open_) & (low <= bb_lo)
-    tc    = (trig & (close.shift(-1) > open_.shift(-1))
-                  & (open_.shift(-1) >= open_)
-                  & (close.shift(-1) >= open_))
-    tlo   = low.where(trig).ffill()
-    nb    = low.rolling(LOOKBACK).min() >= tlo
-    tcv, nbv = tc.values, nb.values
-    sigs = []
-    for i in range(LOOKBACK, n - 1):
-        if not tcv[i] or not nbv[i]: continue
-        e, s = cv[i], lv[i]
-        if np.isnan(e) or np.isnan(s): continue
-        if (e - s) / e > MAX_STOP_DIST: continue
-        sigs.append({'signal_idx': i, 'signal_date': df.index[i],
-                     'entry_price': float(e), 'stop_loss': float(s)})
-    return sigs
-
-def find_stoch_macd_signals(df):
-    close, high, low, open_ = df['Close'], df['High'], df['Low'], df['Open']
-    cv, lv = close.values, low.values
-    n = len(df)
-    bb_lo = close.rolling(BB_LENGTH).mean() - BB_MULT * close.rolling(BB_LENGTH).std(ddof=0)
-    trig  = (close > open_) & (low <= bb_lo)
-    vp    = (trig.shift(1).fillna(False) & (close > open_)
-             & (open_ >= open_.shift(1)) & (close >= open_.shift(1)))
-    ll    = low.rolling(STOCH_K).min()
-    hh    = high.rolling(STOCH_K).max()
-    sk    = 100 * (close - ll) / (hh - ll)
-    sd    = ((low < low.shift(1).rolling(STOCH_LOOKBACK).min())
-             & (sk > sk.shift(1).rolling(STOCH_LOOKBACK).min()))
-    tlo   = low.where(trig).ffill()
-    nb    = low.rolling(LOOKBACK).min() >= tlo
-    bhl   = close <= 0.85 * high.rolling(YEAR_HIGH_BARS).max()
-    ml, sl_a, hist = compute_macd(close)
-    vpv, sdv, nbv, bhlv, tv = vp.values, sd.values, nb.values, bhl.values, trig.values
-    sigs = []
-    for i in range(LOOKBACK + 1, n - 1):
-        if not nbv[i] or not bhlv[i]: continue
-        if not any(vpv[max(0, i - LOOKBACK):i]): continue
-        if not any(sdv[max(0, i - LOOKBACK):i]): continue
-        pi = max(0, i - LOOKBACK)
-        if np.isnan(hist[i]) or np.isnan(hist[pi]): continue
-        if not ((hist[i] > hist[pi]) or (ml[i] > ml[pi]) or (sl_a[i] > sl_a[pi])): continue
-        ti = next((k for k in range(i, max(i - LOOKBACK, -1), -1) if tv[k]), None)
-        if ti is None: continue
-        e, s = cv[ti], lv[ti]
-        if np.isnan(e) or np.isnan(s): continue
-        if (e - s) / e > MAX_STOP_DIST: continue
-        if sigs and sigs[-1]['signal_idx'] == ti: continue
-        sigs.append({'signal_idx': ti, 'signal_date': df.index[ti],
-                     'entry_price': float(e), 'stop_loss': float(s)})
-    return sigs
-
-# ── Trade evaluation ───────────────────────────────────────────────────────────
-def eval_trade(df, signal, position_size):
+# ── Trade evaluation (parameterised hold_bars) ─────────────────────────────────
+def eval_trade(df, signal, position_size, hold_bars):
     idx, entry, stop = signal['signal_idx'], signal['entry_price'], signal['stop_loss']
     n, win = len(df), entry * (1 + WIN_TARGET)
     shares = position_size / entry
     result, exit_price, exit_bar = 'NEUTRAL', None, None
-    for w in range(1, HOLD_BARS + 1):
+    for w in range(1, hold_bars + 1):
         fi = idx + w
         if fi >= n: break
         wh, wl = float(df['High'].iloc[fi]), float(df['Low'].iloc[fi])
         if wh >= win:  result, exit_price, exit_bar = 'WIN',  win,  w; break
         if wl <= stop: result, exit_price, exit_bar = 'LOSS', stop, w; break
     if result == 'NEUTRAL':
-        last       = min(idx + HOLD_BARS, n - 1)
+        last       = min(idx + hold_bars, n - 1)
         exit_price = float(df['Close'].iloc[last])
-        exit_bar   = min(HOLD_BARS, n - 1 - idx)
+        exit_bar   = min(hold_bars, n - 1 - idx)
     pct    = (exit_price - entry) / entry * 100
     dollar = shares * (exit_price - entry)
     sig_dt = signal['signal_date']
@@ -304,12 +189,22 @@ def eval_trade(df, signal, position_size):
 
 # ── Main backtest ──────────────────────────────────────────────────────────────
 def run_backtest(tickers):
+    """
+    Returns results dict keyed by (tier, hold_bars).
+    tier in ['ultra', 'high']
+    hold_bars in HOLD_PERIODS
+    """
     cutoff   = pd.Timestamp.now() - pd.DateOffset(years=YEARS_HISTORY)
+    max_hold = max(HOLD_PERIODS)
     min_bars = max(VF_LB + MAX_GAP,
-                   YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + HOLD_BARS + 10
-    results  = {k: [] for k in ['ultra', 'high', 'standard', 'bb_only', 'stoch_macd']}
-    print(f'Backtesting {len(tickers)} tickers '
-          f'({YEARS_HISTORY}yr, {INTERVAL}, {HOLD_BARS}-bar hold, {int(WIN_TARGET*100)}% target)...')
+                   YEAR_HIGH_BARS + LOOKBACK + STOCH_LOOKBACK) + max_hold + 10
+
+    results = {(tier, hold): []
+               for tier in ['ultra', 'high']
+               for hold in HOLD_PERIODS}
+
+    print(f'Backtesting {len(tickers)} tickers  '
+          f'({YEARS_HISTORY}yr, {INTERVAL}, holds={HOLD_PERIODS}, {int(WIN_TARGET*100)}% target)...')
 
     for i, ticker in enumerate(tickers):
         try:
@@ -339,34 +234,13 @@ def run_backtest(tickers):
                 has_stoch = any((si + o) in stoch_active
                                 for o in range(-SCAN_DELAY, SCAN_DELAY + 1))
                 sig['ticker'] = ticker
-                t = eval_trade(df, sig, POSITION_HIGH)
-                if t is None: continue
-                if sig['has_macd'] and has_stoch: results['ultra'].append(t)
-                if has_stoch:                     results['high'].append(t)
-
-            for sig in find_stoch_signals(df):
-                si, e = sig['signal_idx'], sig['entry_price']
-                if e < rc * 0.15 or e > rc * 6.0: continue
-                if si + 1 >= len(df): continue
-                sig['ticker'] = ticker
-                t = eval_trade(df, sig, POSITION_STD)
-                if t: results['standard'].append(t)
-
-            for sig in find_bb_only_signals(df):
-                si, e = sig['signal_idx'], sig['entry_price']
-                if e < rc * 0.15 or e > rc * 6.0: continue
-                if si + 1 >= len(df): continue
-                sig['ticker'] = ticker
-                t = eval_trade(df, sig, POSITION_STD)
-                if t: results['bb_only'].append(t)
-
-            for sig in find_stoch_macd_signals(df):
-                si, e = sig['signal_idx'], sig['entry_price']
-                if e < rc * 0.15 or e > rc * 6.0: continue
-                if si + 1 >= len(df): continue
-                sig['ticker'] = ticker
-                t = eval_trade(df, sig, POSITION_STD)
-                if t: results['stoch_macd'].append(t)
+                for hold in HOLD_PERIODS:
+                    t = eval_trade(df, sig, POSITION_HIGH, hold)
+                    if t is None: continue
+                    if sig['has_macd'] and has_stoch:
+                        results[('ultra', hold)].append(t)
+                    if has_stoch:
+                        results[('high', hold)].append(t)
 
         except Exception as ex:
             print(f'  Error {ticker}: {ex}')
@@ -392,11 +266,11 @@ def get_spy_annual_returns(years_back=YEARS_HISTORY):
             annual[yr] = ret
         return annual
     except Exception as e:
-        print(f'SPY fetch error: {e}')
+        print(f'SPY error: {e}')
         return {}
 
 # ── Stats helpers ──────────────────────────────────────────────────────────────
-def bucket_stats(trades, position_size):
+def bucket_stats(trades):
     if not trades: return None
     wins    = [t for t in trades if t['result'] == 'WIN']
     losses  = [t for t in trades if t['result'] == 'LOSS']
@@ -408,41 +282,89 @@ def bucket_stats(trades, position_size):
     al      = safe_mean([t['pct_return'] for t in losses])
     ev      = (wr / 100 * aw) + (lr / 100 * al)
     pnl     = safe_sum([t['dollar_return'] for t in trades])
-    capital = total * position_size
+    capital = total * POSITION_HIGH
     roi     = (pnl / capital * 100) if capital > 0 else 0.0
     hold_b  = safe_mean([t['exit_bar'] for t in trades if t['exit_bar'] is not None])
     return dict(total=total, wins=len(wins), losses=len(losses), neutral=len(neutral),
                 wr=wr, lr=lr, aw=aw, al=al, ev=ev, pnl=pnl, roi=roi, hold_b=hold_b)
 
-def signals_per_month(trades, years=YEARS_HISTORY):
-    return len(trades) / (years * 12) if years > 0 else 0.0
+def signals_per_month(trades):
+    return len(trades) / (YEARS_HISTORY * 12)
 
-def yearly_stats(trades, position_size):
+def yearly_stats(trades):
     by_year = {}
     for t in trades:
         yr = t.get('year', 0)
         by_year.setdefault(yr, []).append(t)
-    return {yr: bucket_stats(tlist, position_size)
-            for yr, tlist in sorted(by_year.items())
-            if bucket_stats(tlist, position_size)}
+    out = {}
+    for yr, tlist in sorted(by_year.items()):
+        s = bucket_stats(tlist)
+        if s: out[yr] = s
+    return out
 
 # ── Report builders ────────────────────────────────────────────────────────────
-def tier_summary_block(label, s, spm):
-    if s is None: return f'  {label}: no signals\n'
-    bl = BAR_LABEL[0]
-    return (f'  {label}\n'
-            f'    Signals:{s["total"]:>6}  ~{spm:.1f}/mo  '
-            f'Wins:{s["wins"]:>5} ({s["wr"]:.1f}%)  '
-            f'Losses:{s["losses"]:>5} ({s["lr"]:.1f}%)  Neutral:{s["neutral"]:>4}\n'
-            f'    Avg win:{s["aw"]:>+7.1f}%  Avg loss:{s["al"]:>+7.1f}%  '
-            f'EV:{s["ev"]:>+6.2f}%  Avg hold:{s["hold_b"]:.1f}{bl}\n'
-            f'    Total P&L: ${s["pnl"]:>+13,.2f}  ROI:{s["roi"]:>+7.1f}%\n')
+def hold_comparison_table(tier_label, results, tier_key):
+    """
+    Side-by-side table comparing all HOLD_PERIODS for one tier.
+    """
+    sep  = '=' * 82
+    sep2 = '-' * 82
+    bl   = BAR_LABEL[0]
 
-def yearly_table(tier_label, yr_stats, spy_annual):
-    if not yr_stats: return f'  {tier_label}: no yearly data\n'
+    lines = [sep, f'  {tier_label}  —  HOLD PERIOD COMPARISON', sep2,
+             f'  {"Metric":<28}' + ''.join(f'  {"Hold="+str(h)+bl:>12}' for h in HOLD_PERIODS),
+             sep2]
+
+    rows = {}
+    for hold in HOLD_PERIODS:
+        s = bucket_stats(results.get((tier_key, hold), []))
+        rows[hold] = s
+
+    def row(label, fn):
+        vals = []
+        for hold in HOLD_PERIODS:
+            s = rows[hold]
+            vals.append(fn(s) if s else 'N/A')
+        return f'  {label:<28}' + ''.join(f'  {v:>12}' for v in vals)
+
+    lines.append(row('Signals',      lambda s: f'{s["total"]}'))
+
+    # Signals/month: computed per-hold directly (signals are same count regardless of hold)
+    spm_vals = [f'{len(results.get((tier_key, hold), []))/(YEARS_HISTORY*12):.1f}/mo'
+                for hold in HOLD_PERIODS]
+    lines.append(f'  {"Signals/month":<28}' + ''.join(f'  {v:>12}' for v in spm_vals))
+
+    lines.append(row('Win rate',     lambda s: f'{s["wr"]:.1f}%'))
+    lines.append(row('Loss rate',    lambda s: f'{s["lr"]:.1f}%'))
+    lines.append(row('Neutral rate', lambda s: f'{100-s["wr"]-s["lr"]:.1f}%'))
+    lines.append(row('Avg win %',    lambda s: f'{s["aw"]:+.1f}%'))
+    lines.append(row('Avg loss %',   lambda s: f'{s["al"]:+.1f}%'))
+    lines.append(row('Exp. value',   lambda s: f'{s["ev"]:+.2f}%'))
+    lines.append(row('Avg hold',     lambda s: f'{s["hold_b"]:.1f}{bl}'))
+    lines.append(row('Total P&L',    lambda s: f'${s["pnl"]:+,.0f}'))
+    lines.append(row('ROI',          lambda s: f'{s["roi"]:+.1f}%'))
+    lines.append(sep2)
+
+    # Winner call
+    best_hold, best_ev = None, -999
+    for hold in HOLD_PERIODS:
+        s = rows[hold]
+        if s and s['ev'] > best_ev:
+            best_ev   = s['ev']
+            best_hold = hold
+    if best_hold:
+        lines.append(f'  ★  Best hold by EV: {best_hold}{bl}  '
+                     f'(EV {best_ev:+.2f}%  '
+                     f'WR {rows[best_hold]["wr"]:.1f}%  '
+                     f'P&L ${rows[best_hold]["pnl"]:+,.0f})')
+    lines.append(sep)
+    return '\n'.join(lines) + '\n'
+
+def yearly_table(tier_label, yr_stats, spy_annual, hold_bars):
+    if not yr_stats: return f'  {tier_label} [{hold_bars}{BAR_LABEL[0]}]: no yearly data\n'
     sep = '-' * 72
     rows = [
-        f'  {tier_label}',
+        f'  {tier_label}  [{hold_bars}-{BAR_LABEL} hold]',
         f'  {"Year":<6} {"Sigs":>5} {"Win%":>6} {"P&L":>14} '
         f'{"ROI%":>7}  {"SPY%":>7}  {"vs SPY":>8}',
         f'  {sep}',
@@ -479,55 +401,57 @@ def trade_history_block(trades, label):
 
 def build_report(results, spy_annual=None):
     if spy_annual is None: spy_annual = {}
-    sep  = '=' * 80
-    sep2 = '-' * 80
+    sep  = '=' * 82
+    sep2 = '-' * 82
 
     tiers = [
-        ('ultra',      POSITION_HIGH, 'TIER 1 ★★★ ULTRA    (BB+VixFix+MACD+Stoch)'),
-        ('high',       POSITION_HIGH, 'TIER 2 ★★  HIGH     (BB+VixFix+Stoch)      '),
-        ('standard',   POSITION_STD,  'TIER 3 ★   STANDARD (BB+Stoch)             '),
-        ('bb_only',    POSITION_STD,  'TIER 3B ★  STD-BB   (BB Trigger only)      '),
-        ('stoch_macd', POSITION_STD,  'TIER 3C ★  STD-MACD (BB+Stoch+MACD)       '),
+        ('ultra', 'TIER 1 ★★★ ULTRA    (BB+VixFix+MACD+Stoch)'),
+        ('high',  'TIER 2 ★★  HIGH     (BB+VixFix+Stoch)      '),
     ]
 
     lines = [
         sep,
-        f'BACKTEST REPORT — {INTERVAL.upper()}  |  {YEARS_HISTORY} years  |  '
-        f'{HOLD_BARS}-{BAR_LABEL} hold  |  {int(WIN_TARGET*100)}% win target',
+        f'BACKTEST REPORT — DAILY (1d)  |  {YEARS_HISTORY} years  |  '
+        f'{int(WIN_TARGET*100)}% win target  |  Tiers 1 & 2 only',
+        f'Hold periods compared: {HOLD_PERIODS[0]}d vs {HOLD_PERIODS[1]}d vs {HOLD_PERIODS[2]}d',
         sep,
         f'  Entry: close of BB trigger candle | Stop: low of BB trigger candle',
-        f'  Position: ${POSITION_HIGH:,.0f} (Tiers 1 & 2, >80% WR) | '
-        f'${POSITION_STD:,.0f} (Tiers 3/3B/3C)',
-        f'  Filters: Price >${MIN_PRICE:.0f} | Mkt cap >$1B | Stop dist <{int(MAX_STOP_DIST*100)}%',
+        f'  Position: ${POSITION_HIGH:,.0f}/trade (both tiers)',
+        f'  Filters: Price >${MIN_PRICE:.0f} | Mkt cap >$1B | Stop dist <11%',
+        f'  YEAR_HIGH_BARS = {YEAR_HIGH_BARS} (≈ {YEAR_HIGH_BARS} trading days per year)',
         f'  ExpVal = (Win% × Avg Win%) + (Loss% × Avg Loss%)',
-        f'  ROI = Total P&L ÷ (Signals × Position Size)',
+        f'  ROI = Total P&L ÷ (Signals × ${POSITION_HIGH:,.0f})',
         sep, '',
-        '── TIER COMPARISON ──────────────────────────────────────────────────────────────',
     ]
-    for key, pos, lbl in tiers:
-        s   = bucket_stats(results[key], pos)
-        spm = signals_per_month(results[key])
-        lines.append(tier_summary_block(f'{lbl} | ${pos:,.0f}/trade', s, spm))
 
-    # ── Year-by-year vs SPY ────────────────────────────────────────────────────
-    lines += [
-        '', sep2,
-        '── YEAR-BY-YEAR PERFORMANCE vs SPY ─────────────────────────────────────────────',
-        '   ROI  = tier P&L ÷ capital deployed that year',
-        '   SPY% = SPY annual price return (buy-and-hold)',
-        '   vs SPY = tier ROI% minus SPY%  (positive = outperformed)',
-        '',
-    ]
-    for key, pos, lbl in tiers:
-        ys = yearly_stats(results[key], pos)
-        lines.append(yearly_table(lbl.strip(), ys, spy_annual))
+    # ── Hold comparison tables ─────────────────────────────────────────────────
+    lines.append('── HOLD PERIOD COMPARISON ───────────────────────────────────────────────────────\n')
+    for tier_key, lbl in tiers:
+        lines.append(hold_comparison_table(lbl, results, tier_key))
 
-    # ── Trade histories ────────────────────────────────────────────────────────
-    lines += ['', sep2]
-    for key, pos, lbl in tiers:
+    # ── Year-by-year vs SPY (one table per tier × hold) ───────────────────────
+    lines += [sep2,
+              '── YEAR-BY-YEAR PERFORMANCE vs SPY ─────────────────────────────────────────────',
+              '   ROI  = tier P&L ÷ capital deployed that year',
+              '   SPY% = SPY annual price return',
+              '   vs SPY = tier ROI% − SPY%  (positive = outperformed)',
+              '']
+    for tier_key, lbl in tiers:
+        for hold in HOLD_PERIODS:
+            trades = results.get((tier_key, hold), [])
+            ys = yearly_stats(trades)
+            lines.append(yearly_table(lbl.strip(), ys, spy_annual, hold))
+
+    # ── Trade histories (20d only — full list for reference) ──────────────────
+    lines += [sep2,
+              f'── TRADE HISTORIES ({HOLD_PERIODS[0]}-DAY HOLD) ─────────────────────────────────────────',
+              '   (20-day hold shown; adjust HOLD_PERIODS[0] to see others)',
+              '']
+    for tier_key, lbl in tiers:
+        trades = results.get((tier_key, HOLD_PERIODS[0]), [])
         lines.append(trade_history_block(
-            results[key],
-            f'── {lbl.strip()} TRADE HISTORY ──────────────────────────────────────────────'))
+            trades,
+            f'── {lbl.strip()} — {HOLD_PERIODS[0]}{BAR_LABEL[0]} hold ─────────────────────────────'))
 
     lines.append(sep)
     return '\n'.join(lines)
@@ -543,8 +467,7 @@ def send_email(subject, report):
             s.login(GMAIL_USER, GMAIL_PASSWORD)
             s.sendmail(GMAIL_USER, TO_EMAIL, msg.as_string())
         print(f'Emailed to {TO_EMAIL}')
-    except Exception as e:
-        print(f'Email failed: {e}')
+    except Exception as e: print(f'Email failed: {e}')
 
 if __name__ == '__main__':
     tickers    = get_all_tickers()
@@ -553,4 +476,5 @@ if __name__ == '__main__':
     report     = build_report(results, spy_annual)
     print('\n' + report)
     if GMAIL_USER:
-        send_email(f'Backtest Report — {INTERVAL.upper()} — {HOLD_BARS}-{BAR_LABEL} hold', report)
+        send_email(f'Backtest Report — Daily  |  {HOLD_PERIODS[0]}d / {HOLD_PERIODS[1]}d / {HOLD_PERIODS[2]}d hold comparison',
+                   report)
