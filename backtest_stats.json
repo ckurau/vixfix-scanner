@@ -42,7 +42,43 @@
     }
   },
   "daily_60d": {
-    "ultra": null,
-    "high": null
+    "ultra": {
+      "total": 151,
+      "wins": 130,
+      "losses": 0,
+      "neutral": 21,
+      "wr": 86.09,
+      "lr": 0.0,
+      "aw": 13.0,
+      "al": 0.0,
+      "ev": 11.19,
+      "pnl": 178752.17,
+      "roi": 11.84,
+      "hold_b": 19.4,
+      "spm": 0.84,
+      "interval": "1d",
+      "hold_bars": 60,
+      "win_target": 0.13,
+      "position": 10000.0
+    },
+    "high": {
+      "total": 312,
+      "wins": 275,
+      "losses": 2,
+      "neutral": 35,
+      "wr": 88.14,
+      "lr": 0.64,
+      "aw": 13.0,
+      "al": -2.71,
+      "ev": 11.44,
+      "pnl": 372167.79,
+      "roi": 11.93,
+      "hold_b": 16.9,
+      "spm": 1.73,
+      "interval": "1d",
+      "hold_bars": 60,
+      "win_target": 0.13,
+      "position": 10000.0
+    }
   }
 }
