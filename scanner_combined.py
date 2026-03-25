@@ -390,13 +390,17 @@ def _tier_html(tier_name,title,description,tickers_this_tier,stats,pos_size,hide
     best_tgt=stats.get('best_target',WIN_TARGET); best_tgt_wr=stats.get('best_target_wr'); best_ev=stats.get('best_ev')
     pos_note=f'${pos_size:,.0f}/trade'
     if wr is not None and wr>80: pos_note='<strong>$10,000/trade</strong>'
-    wr_str=(f'{wr:.1f}% win rate &nbsp;|&nbsp; {n_sigs} signals over 15yr &nbsp;|&nbsp; ~{spm:.1f}/mo'
-            if wr is not None else 'Run full backtest (backtest.py) to determine win rate')
+    # Always show win rate if available; only fall back if truly no signals found in sample
+    if wr is not None and n_sigs > 0:
+        wr_str=(f'<strong>{wr:.1f}%</strong> win rate at {int(WIN_TARGET*100)}% target &nbsp;|&nbsp; '
+                f'{n_sigs} signals found in sample &nbsp;|&nbsp; ~{spm:.1f}/mo')
+    else:
+        wr_str='No signals found in backtest sample — run backtest.py for full results'
     best_ev_str=''
     if best_tgt is not None and best_tgt_wr is not None and best_ev is not None:
-        best_ev_str=(f'<br><em>Best EV target: <strong>{int(best_tgt*100)}%</strong> '
-                     f'&nbsp;|&nbsp; Win rate at that target: <strong>{best_tgt_wr:.1f}%</strong> '
-                     f'&nbsp;|&nbsp; EV: {best_ev:+.2f}%</em>')
+        best_ev_str=(f'<br><em>Best EV exit target: <strong>{int(best_tgt*100)}%</strong> &nbsp;|&nbsp; '
+                     f'Win rate at that target: <strong>{best_tgt_wr:.1f}%</strong> &nbsp;|&nbsp; '
+                     f'EV: {best_ev:+.2f}%</em>')
     excl=set(hide_already_in) if hide_already_in else set()
     show=[t for t in tickers_this_tier if t not in excl]
     if show:
@@ -411,7 +415,7 @@ def _tier_html(tier_name,title,description,tickers_this_tier,stats,pos_size,hide
   <h2 style="margin:0 0 6px 0;font-size:1.1em;color:#222;">{title}</h2>
   <p style="margin:2px 0;font-size:0.85em;color:#555;">{description}</p>
   <p style="margin:6px 0;font-size:0.85em;">
-    <strong>Backtest ({YEARS_HISTORY}yr, weekly, {BACKTEST_SAMPLE}-ticker sample):</strong> {wr_str}{best_ev_str}
+    <strong>Backtest ({YEARS_HISTORY}yr, weekly):</strong> {wr_str}{best_ev_str}
   </p>
   <p style="margin:4px 0;font-size:0.85em;">
     <strong>Position:</strong> {pos_note} &nbsp;|&nbsp;
