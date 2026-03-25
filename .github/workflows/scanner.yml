@@ -1,7 +1,10 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEDULED SCANS WORKFLOW
-# Runs daily/weekly scans on schedule. Also triggered manually for scan-only.
 # Reads backtest_stats.json from the repo (written by backtests.yml).
+# On scheduled runs: adds new signals to trade_history.json, attaches
+# trade_tracker.xlsx to the email, and commits trade_history.json.
+# On workflow_dispatch: sends email with current tracker but does NOT
+# add new rows or commit — safe for testing.
 #
 # TIMING (ET / US Eastern):
 #   Daily scan:  Mon–Fri 6:30pm ET (23:30 UTC) — buy next morning at open
@@ -22,10 +25,12 @@ jobs:
     name: Weekly Scan (1wk — buy Monday open)
     steps:
       - uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      - run: pip install yfinance pandas numpy requests
+      - run: pip install yfinance pandas numpy requests openpyxl
       - name: Run weekly scan (Fridays only)
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -38,18 +43,56 @@ jobs:
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+      - name: Commit trade_history.json (scheduled runs only)
+        if: github.event_name == 'schedule'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add trade_history.json
+          git diff --cached --quiet && echo "No new signals" && exit 0
+          git stash
+          git pull --rebase origin main
+          git stash pop
+          git add trade_history.json
+          git commit -m "Add weekly scan signals to trade history [skip ci]"
+          for i in 1 2 3; do
+            git push && break
+            echo "Push attempt $i failed, retrying..."
+            git pull --rebase origin main
+          done
 
   daily-scan:
     runs-on: ubuntu-latest
     name: Daily Scan (1d — buy next morning open)
     steps:
       - uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      - run: pip install yfinance pandas numpy requests
+      - run: pip install yfinance pandas numpy requests openpyxl
       - name: Run daily scan
         run: python scanner_daily.py
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+      - name: Commit trade_history.json (scheduled runs only)
+        if: github.event_name == 'schedule'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add trade_history.json
+          git diff --cached --quiet && echo "No new signals" && exit 0
+          git stash
+          git pull --rebase origin main
+          git stash pop
+          git add trade_history.json
+          git commit -m "Add daily scan signals to trade history [skip ci]"
+          for i in 1 2 3; do
+            git push && break
+            echo "Push attempt $i failed, retrying..."
+            git pull --rebase origin main
+          done
