@@ -29,7 +29,7 @@ WIN_TARGET     = 0.13
 POSITION_SIZE  = 10_000.0
 
 # ── Change this to any ticker you want to debug ────────────────────────────────
-TICKER = 'VERX'
+TICKER = 'CRM'
 
 def compute_macd(close):
     ema_fast  = close.ewm(span=MACD_FAST,   adjust=False).mean()
