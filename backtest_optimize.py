@@ -1,12 +1,10 @@
 """
 backtest_optimize.py
-Exit target optimization for all configurations:
+Exit target optimization for the 2 active strategies:
   1) Weekly (1wk) — 20-week hold
-  2) Daily  (1d)  — 20-day  hold
-  3) Daily  (1d)  — 30-day  hold
-  4) Daily  (1d)  — 60-day  hold
-Tiers 1 & 2 only (Tier 3 win rate not high enough to include).
-Sweeps exit targets 5%–50% in 5% steps.
+  2) Daily  (1d)  — 60-day  hold
+Tiers 1 & 2 only. Sweeps exit targets 5%–50% in 5% steps.
+Runtime: ~40–45 minutes.
 """
 import requests, pandas as pd, numpy as np, yfinance as yf
 import smtplib, time, os
@@ -37,8 +35,6 @@ TO_EMAIL       = 'bkcolby@yahoo.com'
 # ── Configurations to run ─────────────────────────────────────────────────────
 CONFIGS = [
     {'interval': '1wk', 'hold': 20, 'year_high_bars': 52,  'label': '1wk / 20-week hold'},
-    {'interval': '1d',  'hold': 20, 'year_high_bars': 252, 'label': '1d  / 20-day  hold'},
-    {'interval': '1d',  'hold': 30, 'year_high_bars': 252, 'label': '1d  / 30-day  hold'},
     {'interval': '1d',  'hold': 60, 'year_high_bars': 252, 'label': '1d  / 60-day  hold'},
 ]
 
@@ -370,7 +366,7 @@ def build_full_report(all_results):
         'EXIT TARGET OPTIMIZATION REPORT',
         f'Tiers 1 & 2 only  |  Sweep: {int(EXIT_TARGETS[0]*100)}%–{int(EXIT_TARGETS[-1]*100)}% in 5% steps',
         f'Position: ${POSITION_HIGH:,.0f}/trade  |  History: {YEARS_HISTORY} years',
-        f'Configurations: {" | ".join(c["label"] for c, _ in all_results)}',
+        f'Active strategies: 1wk/20-week hold  |  1d/60-day hold',
         sep, '',
     ]
 
@@ -392,7 +388,7 @@ def send_email(report):
     msg = MIMEMultipart()
     msg['From']    = GMAIL_USER
     msg['To']      = TO_EMAIL
-    msg['Subject'] = 'Exit Target Optimization — 4 Configurations (1wk/1d × 20/30/60 hold)'
+    msg['Subject'] = 'Exit Target Optimization — 1wk/20w & 1d/60d'
     msg.attach(MIMEText(report, 'plain'))
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
