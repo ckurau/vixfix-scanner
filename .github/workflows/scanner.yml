@@ -1,21 +1,27 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEDULED SCANS WORKFLOW
-# Reads backtest_stats.json from the repo (written by backtests.yml).
-# On scheduled runs: adds new signals to trade_history.json, attaches
-# trade_tracker.xlsx to the email, and commits trade_history.json.
-# On workflow_dispatch: sends email with current tracker but does NOT
-# add new rows or commit — safe for testing.
 #
-# TIMING (ET / US Eastern):
-#   Daily scan:  Mon–Fri 6:30pm ET (23:30 UTC) — buy next morning at open
-#   Weekly scan: Friday 6:30pm ET only          — buy Monday at open
+# TIMING (PST = UTC-8, PDT = UTC-4):
+#   Target: 6:30pm PST / 7:30pm PDT Mon–Fri
+#   Cron:   02:30 UTC Tue–Sat  (= 6:30pm PST Mon–Fri)
+#   Note:   During PDT (Mar–Nov) this fires at 7:30pm local — acceptable.
+#           During PST (Nov–Mar) this fires at 6:30pm local — exact.
+#
+# BEHAVIOR:
+#   Scheduled runs:         add signals to trade_history.json, attach tracker,
+#                           commit trade_history.json to repo
+#   workflow_dispatch runs: send email + tracker with current state,
+#                           do NOT add new signals or commit
+#
+# DAILY SCAN:  Mon–Fri — buy next morning at open
+# WEEKLY SCAN: Friday only (filtered inside job step) — buy Monday at open
 # ══════════════════════════════════════════════════════════════════════════════
 
 name: Stock Scanners
 
 on:
   schedule:
-    - cron: '30 23 * * 1-5'
+    - cron: '30 2 * * 2-6'
   workflow_dispatch:
 
 jobs:
@@ -50,7 +56,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add trade_history.json
-          git diff --cached --quiet && echo "No new signals" && exit 0
+          git diff --cached --quiet && echo "No new signals to commit" && exit 0
           git stash
           git pull --rebase origin main
           git stash pop
@@ -85,7 +91,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add trade_history.json
-          git diff --cached --quiet && echo "No new signals" && exit 0
+          git diff --cached --quiet && echo "No new signals to commit" && exit 0
           git stash
           git pull --rebase origin main
           git stash pop
