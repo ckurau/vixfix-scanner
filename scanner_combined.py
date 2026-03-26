@@ -402,10 +402,9 @@ if __name__ == '__main__':
     print(f'\n[Done] ULTRA:{len(ultra)}  HIGH:{len(high)}')
     if GMAIL_USER:
         from datetime import date
-        send_email(
-            f'Weekly Stock Scan (1wk) — {date.today().strftime("%b %d %Y")}',
-            html,
-            attachment_path=tracker_path
-        )
+        signal_count = len(ultra) + len(set(high) - set(ultra))
+        subject = (f'Weekly Stock Scan (1wk) — {date.today().strftime("%b %d %Y")} '
+                   f'— {signal_count} signal{"s" if signal_count != 1 else ""} found')
+        send_email(subject, html, attachment_path=tracker_path)
     else:
         print(html[:1500])
