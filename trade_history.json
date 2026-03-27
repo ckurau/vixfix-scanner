@@ -1,1 +1,15 @@
-[]
+[
+  {
+    "scan_date": "2026-03-27",
+    "ticker": "CRM",
+    "strategy": "1WK \u2014 Tier 2 High",
+    "interval": "1wk",
+    "buy_price": 185.64,
+    "stop_loss": 179.53,
+    "result": "OPEN",
+    "date_bought": "2026-03-27",
+    "date_sold": "",
+    "exit_price": "",
+    "notes": ""
+  }
+]
