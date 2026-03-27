@@ -1,7 +1,7 @@
 """
 scanner_daily.py  —  Daily scanner (interval=1d, Tiers 1 & 2 only, 60-day hold)
 Reads historical stats from backtest_stats.json (written by backtest_daily.py).
-Run backtest_daily.py first via workflow_dispatch to populate stats.
+Run backtest_daily.py first via workflow_dispatch to populate stats, heck yeah.
 Sends HTML email. Entry logic: buy at next day's open after signal fires.
 """
 import requests, pandas as pd, numpy as np, yfinance as yf
