@@ -77,12 +77,6 @@ def no_break_before(lv, idx, n):
         if lv[j] < tl: return False
     return True
 
-def no_break_after(lv, idx, end):
-    tl = lv[idx]
-    for j in range(idx + 1, end + 1):
-        if lv[j] < tl: return False
-    return True
-
 def macd_divergence(pi, ri, ml, sl, hist):
     vals = [hist[pi], hist[ri], ml[pi], ml[ri], sl[pi], sl[ri]]
     if any(np.isnan(v) for v in vals): return False
@@ -122,7 +116,6 @@ def check_vixfix(df, ml, sl, hist):
     if np.isnan(rl) or np.isnan(rw): return False, False
     if not no_break_before(lv, recent_idx, NO_BREAK_BARS): return False, False
     if (rc - rl) / rc > MAX_STOP_DIST: return False, False
-    if not no_break_after(lv, recent_idx, n - 1): return False, False
     for j in range(recent_idx - 1, max(recent_idx - MAX_GAP, 0) - 1, -1):
         if not twvf[j]: continue
         pl, pw = lv[j], wvfv[j]
