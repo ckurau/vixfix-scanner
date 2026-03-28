@@ -95,11 +95,13 @@ def macd_divergence(pi, ri, ml, sl, hist):
 def volume_above_ma(df, idx):
     """Returns True if trigger candle volume > 20-bar average volume."""
     if 'Volume' not in df.columns: return True   # skip if no volume data
-    vol = df['Volume'].values
+    vol = df['Volume'].values.astype(float)
+    cur = vol[idx]
+    if np.isnan(cur) or cur == 0: return True    # no volume data, allow signal
     if idx < VOLUME_MA_BARS: return True          # not enough history, allow
-    avg = np.mean(vol[idx - VOLUME_MA_BARS:idx])
-    if avg == 0: return True
-    return float(vol[idx]) > avg
+    avg = np.nanmean(vol[idx - VOLUME_MA_BARS:idx])
+    if np.isnan(avg) or avg == 0: return True    # no usable history, allow
+    return cur > avg
 
 # ── Signal finders ─────────────────────────────────────────────────────────────
 def find_vixfix_pairs(df, year_high_bars):
