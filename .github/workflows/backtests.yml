@@ -117,4 +117,4 @@ jobs:
           python-version: '3.11'
       - run: pip install yfinance pandas numpy requests
       - name: Run debug
-        run: python debug_ticker.py
+        run: python debug_volume.py
