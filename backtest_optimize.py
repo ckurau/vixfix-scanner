@@ -20,7 +20,10 @@ STOCH_LOOKBACK = 25;  STOCH_K   = 14;  LOOKBACK = 10
 MACD_FAST      = 12;  MACD_SLOW = 26;  MACD_SIGNAL = 9
 
 POSITION_HIGH  = 10000.0
-EXIT_TARGETS   = [i / 100 for i in range(5, 55, 5)]
+EXIT_TARGETS   = sorted(set(
+    [i / 100 for i in range(5, 55, 5)] +   # 5,10,15,...,50  (5% steps)
+    [0.11, 0.12, 0.13, 0.14]                # extra granularity 11–14%
+))
 YEARS_HISTORY  = 15
 
 MIN_PRICE      = 10.0
@@ -37,6 +40,8 @@ CONFIGS = [
     {'interval': '1wk', 'hold': 20, 'year_high_bars': 52,  'label': '1wk / 20-week hold'},
     {'interval': '1d',  'hold': 60, 'year_high_bars': 252, 'label': '1d  / 60-day  hold'},
 ]
+
+VOLUME_MA_BARS = 20   # trigger candle volume must be above this MA
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def safe_mean(v):
@@ -86,6 +91,15 @@ def macd_divergence(pi, ri, ml, sl, hist):
     vals = [hist[pi], hist[ri], ml[pi], ml[ri], sl[pi], sl[ri]]
     if any(np.isnan(v) for v in vals): return False
     return (hist[ri] > hist[pi]) or (ml[ri] > ml[pi]) or (sl[ri] > sl[pi])
+
+def volume_above_ma(df, idx):
+    """Returns True if trigger candle volume > 20-bar average volume."""
+    if 'Volume' not in df.columns: return True   # skip if no volume data
+    vol = df['Volume'].values
+    if idx < VOLUME_MA_BARS: return True          # not enough history, allow
+    avg = np.mean(vol[idx - VOLUME_MA_BARS:idx])
+    if avg == 0: return True
+    return float(vol[idx]) > avg
 
 # ── Signal finders ─────────────────────────────────────────────────────────────
 def find_vixfix_pairs(df, year_high_bars):
@@ -206,7 +220,7 @@ def run_one_config(tickers, interval, hold, year_high_bars):
     # tier -> {target -> [trades]}
     tier_results = {
         tier: {tgt: [] for tgt in EXIT_TARGETS}
-        for tier in ['ultra', 'high']
+        for tier in ['ultra', 'high', 'tier3_vol']
     }
 
     for i, ticker in enumerate(tickers):
@@ -238,12 +252,15 @@ def run_one_config(tickers, interval, hold, year_high_bars):
                                 for o in range(-SCAN_DELAY, SCAN_DELAY + 1))
                 sig['ticker'] = ticker
                 bars = collect_bars(df, sig, hold)
+                has_vol = volume_above_ma(df, si)
                 for tgt in EXIT_TARGETS:
                     t = evaluate_signal(sig, bars, tgt, hold)
                     if sig['has_macd'] and has_stoch:
                         tier_results['ultra'][tgt].append(t)
                     if has_stoch:
                         tier_results['high'][tgt].append(t)
+                    if has_stoch and has_vol:
+                        tier_results['tier3_vol'][tgt].append(t)
 
         except Exception as ex:
             print(f'    Error {ticker}: {ex}')
@@ -348,16 +365,18 @@ def build_full_report(all_results):
     """
     sep = '=' * 70
     tier_configs = [
-        ('ultra', 'TIER 1 ★★★ ULTRA    (BB+VixFix+MACD+Stoch)',
-                  'All four conditions confirmed. Highest conviction.'),
-        ('high',  'TIER 2 ★★  HIGH     (BB+VixFix+Stoch)',
-                  'VixFix div + Stochastic div confirmed. MACD not required.'),
+        ('ultra',     'TIER 1 ★★★ ULTRA    (BB+VixFix+MACD+Stoch)',
+                      'All four conditions confirmed. Highest conviction.'),
+        ('high',      'TIER 2 ★★  HIGH     (BB+VixFix+Stoch)',
+                      'VixFix div + Stochastic div confirmed. MACD not required.'),
+        ('tier3_vol', 'TIER 3 ★   HIGH + Volume Filter (BB+VixFix+Stoch+Volume)',
+                      'Same as Tier 2 + trigger candle volume > 20-bar average volume.'),
     ]
 
     lines = [
         sep,
         'EXIT TARGET OPTIMIZATION REPORT',
-        f'Tiers 1 & 2 only  |  Sweep: {int(EXIT_TARGETS[0]*100)}%–{int(EXIT_TARGETS[-1]*100)}% in 5% steps',
+        f'Tiers 1, 2 & 3  |  Sweep: 5%–50% (5% steps) + 11/12/13/14% granularity',
         f'Position: ${POSITION_HIGH:,.0f}/trade  |  History: {YEARS_HISTORY} years',
         f'Active strategies: 1wk/20-week hold  |  1d/60-day hold',
         sep, '',
@@ -381,7 +400,7 @@ def send_email(report):
     msg = MIMEMultipart()
     msg['From']    = GMAIL_USER
     msg['To']      = TO_EMAIL
-    msg['Subject'] = 'Exit Target Optimization — 1wk/20w & 1d/60d'
+    msg['Subject'] = 'Exit Target Optimization — 1wk/20w & 1d/60d — Tiers 1/2/3'
     msg.attach(MIMEText(report, 'plain'))
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
