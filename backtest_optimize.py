@@ -82,12 +82,6 @@ def no_break_before(lv, idx, n):
         if lv[j] < tl: return False
     return True
 
-def no_break_after(lv, idx, end):
-    tl = lv[idx]
-    for j in range(idx + 1, end + 1):
-        if lv[j] < tl: return False
-    return True
-
 def macd_divergence(pi, ri, ml, sl, hist):
     vals = [hist[pi], hist[ri], ml[pi], ml[ri], sl[pi], sl[ri]]
     if any(np.isnan(v) for v in vals): return False
@@ -127,7 +121,6 @@ def find_vixfix_pairs(df, year_high_bars):
         if np.isnan(rl) or np.isnan(rw): continue
         if not no_break_before(lv, ri, NO_BREAK_BARS): continue
         if (rc - rl) / rc > MAX_STOP_DIST: continue
-        if not no_break_after(lv, ri, n - 1): continue
         for j in range(ri - 1, max(ri - MAX_GAP, 0) - 1, -1):
             if not twvf[j]: continue
             pl, pw = lv[j], wvfv[j]
