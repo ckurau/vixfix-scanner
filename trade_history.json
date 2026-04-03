@@ -6,8 +6,21 @@
     "interval": "1wk",
     "buy_price": 185.64,
     "stop_loss": 179.53,
-    "result": "OPEN",
+    "result": "LOSS",
     "date_bought": "2026-03-27",
+    "date_sold": "2026-03-27",
+    "exit_price": 179.53,
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-04-03",
+    "ticker": "CRM",
+    "strategy": "1WK \u2014 Tier 2 High",
+    "interval": "1wk",
+    "buy_price": 187.18,
+    "stop_loss": 179.58,
+    "result": "OPEN",
+    "date_bought": "2026-04-03",
     "date_sold": "",
     "exit_price": "",
     "notes": ""
