@@ -422,10 +422,10 @@
     "interval": "1wk",
     "buy_price": 90.78,
     "stop_loss": 85.6,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-06-05",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-24",
+    "exit_price": 102.5814,
     "notes": ""
   },
   {
@@ -435,10 +435,10 @@
     "interval": "1wk",
     "buy_price": 301.21,
     "stop_loss": 290.96,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-06-05",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-28",
+    "exit_price": 340.3673,
     "notes": ""
   },
   {
@@ -461,10 +461,10 @@
     "interval": "1wk",
     "buy_price": 72.32,
     "stop_loss": 66.78,
-    "result": "OPEN",
+    "result": "LOSS",
     "date_bought": "2026-06-12",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-30",
+    "exit_price": 66.78,
     "notes": ""
   },
   {
@@ -591,10 +591,10 @@
     "interval": "1wk",
     "buy_price": 307.8,
     "stop_loss": 299.19,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-06-19",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-28",
+    "exit_price": 347.814,
     "notes": ""
   },
   {
@@ -682,10 +682,10 @@
     "interval": "1wk",
     "buy_price": 37.78,
     "stop_loss": 34.59,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-06-26",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-30",
+    "exit_price": 42.6914,
     "notes": ""
   },
   {
@@ -708,10 +708,10 @@
     "interval": "1wk",
     "buy_price": 20.85,
     "stop_loss": 18.924,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-03",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-29",
+    "exit_price": 23.5605,
     "notes": ""
   },
   {
@@ -721,10 +721,10 @@
     "interval": "1wk",
     "buy_price": 27.02,
     "stop_loss": 24.85,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-03",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-28",
+    "exit_price": 30.5326,
     "notes": ""
   },
   {
@@ -734,10 +734,10 @@
     "interval": "1wk",
     "buy_price": 275.35,
     "stop_loss": 259.11,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-03",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-28",
+    "exit_price": 311.1455,
     "notes": ""
   },
   {
@@ -799,10 +799,10 @@
     "interval": "1wk",
     "buy_price": 37.48,
     "stop_loss": 36.1,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-03",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-30",
+    "exit_price": 42.3524,
     "notes": ""
   },
   {
@@ -838,10 +838,10 @@
     "interval": "1wk",
     "buy_price": 20.67,
     "stop_loss": 20.035,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-10",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-29",
+    "exit_price": 23.3571,
     "notes": ""
   },
   {
@@ -851,10 +851,10 @@
     "interval": "1wk",
     "buy_price": 135.11,
     "stop_loss": 131.52,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-10",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-28",
+    "exit_price": 152.6743,
     "notes": ""
   },
   {
@@ -864,10 +864,10 @@
     "interval": "1wk",
     "buy_price": 273.38,
     "stop_loss": 259.37,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-10",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-27",
+    "exit_price": 308.9194,
     "notes": ""
   },
   {
@@ -890,10 +890,10 @@
     "interval": "1wk",
     "buy_price": 66.73,
     "stop_loss": 64.22,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-10",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-24",
+    "exit_price": 75.4049,
     "notes": ""
   },
   {
@@ -955,10 +955,10 @@
     "interval": "1wk",
     "buy_price": 294.79,
     "stop_loss": 271.7,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-17",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-29",
+    "exit_price": 333.1127,
     "notes": ""
   },
   {
@@ -994,10 +994,10 @@
     "interval": "1wk",
     "buy_price": 20.46,
     "stop_loss": 20.28,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-24",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-29",
+    "exit_price": 23.1198,
     "notes": ""
   },
   {
@@ -1020,10 +1020,10 @@
     "interval": "1wk",
     "buy_price": 281.53,
     "stop_loss": 278.94,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-24",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-07-28",
+    "exit_price": 318.1289,
     "notes": ""
   },
   {
@@ -1033,8 +1033,47 @@
     "interval": "1wk",
     "buy_price": 66.95,
     "stop_loss": 66.23,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-24",
+    "date_sold": "2026-07-27",
+    "exit_price": 75.6535,
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-07-31",
+    "ticker": "CHWY",
+    "strategy": "1WK \u2014 Tier 1 Ultra",
+    "interval": "1wk",
+    "buy_price": 22.82,
+    "stop_loss": 21.2,
+    "result": "OPEN",
+    "date_bought": "2026-07-31",
+    "date_sold": "",
+    "exit_price": "",
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-07-31",
+    "ticker": "ICE",
+    "strategy": "1WK \u2014 Tier 1 Ultra",
+    "interval": "1wk",
+    "buy_price": 156.27,
+    "stop_loss": 144.89,
+    "result": "OPEN",
+    "date_bought": "2026-07-31",
+    "date_sold": "",
+    "exit_price": "",
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-07-31",
+    "ticker": "INTU",
+    "strategy": "1WK \u2014 Tier 1 Ultra",
+    "interval": "1wk",
+    "buy_price": 315.5,
+    "stop_loss": 299.63,
+    "result": "OPEN",
+    "date_bought": "2026-07-31",
     "date_sold": "",
     "exit_price": "",
     "notes": ""
