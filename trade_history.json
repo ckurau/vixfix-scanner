@@ -474,10 +474,10 @@
     "interval": "1wk",
     "buy_price": 58.33,
     "stop_loss": 51.6,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-06-12",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-08-04",
+    "exit_price": 65.9129,
     "notes": ""
   },
   {
@@ -643,10 +643,10 @@
     "interval": "1wk",
     "buy_price": 198.6,
     "stop_loss": 187.25,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-06-26",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-08-05",
+    "exit_price": 224.418,
     "notes": ""
   },
   {
@@ -929,10 +929,10 @@
     "interval": "1wk",
     "buy_price": 21.53,
     "stop_loss": 20.04,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-17",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-08-05",
+    "exit_price": 24.3289,
     "notes": ""
   },
   {
@@ -1074,6 +1074,19 @@
     "stop_loss": 299.63,
     "result": "OPEN",
     "date_bought": "2026-07-31",
+    "date_sold": "",
+    "exit_price": "",
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-08-07",
+    "ticker": "ICE",
+    "strategy": "1WK \u2014 Tier 1 Ultra",
+    "interval": "1wk",
+    "buy_price": 149.75,
+    "stop_loss": 147.47,
+    "result": "OPEN",
+    "date_bought": "2026-08-07",
     "date_sold": "",
     "exit_price": "",
     "notes": ""
