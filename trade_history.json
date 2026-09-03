@@ -942,10 +942,10 @@
     "interval": "1wk",
     "buy_price": 141.76,
     "stop_loss": 135.48,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-17",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-08-20",
+    "exit_price": 160.1888,
     "notes": ""
   },
   {
@@ -1007,10 +1007,10 @@
     "interval": "1wk",
     "buy_price": 143.21,
     "stop_loss": 137.76,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-24",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-08-21",
+    "exit_price": 161.8273,
     "notes": ""
   },
   {
@@ -1072,10 +1072,10 @@
     "interval": "1wk",
     "buy_price": 315.5,
     "stop_loss": 299.63,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-31",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-08-13",
+    "exit_price": 356.515,
     "notes": ""
   },
   {
@@ -1087,6 +1087,19 @@
     "stop_loss": 147.47,
     "result": "OPEN",
     "date_bought": "2026-08-07",
+    "date_sold": "",
+    "exit_price": "",
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-09-03",
+    "ticker": "SRE",
+    "strategy": "1D \u2014 Tier 1 Ultra",
+    "interval": "1d",
+    "buy_price": 83.79,
+    "stop_loss": 82.56,
+    "result": "OPEN",
+    "date_bought": "2026-09-03",
     "date_sold": "",
     "exit_price": "",
     "notes": ""
