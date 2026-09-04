@@ -1103,5 +1103,44 @@
     "date_sold": "",
     "exit_price": "",
     "notes": ""
+  },
+  {
+    "scan_date": "2026-09-04",
+    "ticker": "CIFR",
+    "strategy": "1D \u2014 Tier 1 Ultra",
+    "interval": "1d",
+    "buy_price": 17.37,
+    "stop_loss": 15.02,
+    "result": "OPEN",
+    "date_bought": "2026-09-04",
+    "date_sold": "",
+    "exit_price": "",
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-09-04",
+    "ticker": "SRE",
+    "strategy": "1D \u2014 Tier 1 Ultra",
+    "interval": "1d",
+    "buy_price": 84.57,
+    "stop_loss": 83.84,
+    "result": "OPEN",
+    "date_bought": "2026-09-04",
+    "date_sold": "",
+    "exit_price": "",
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-09-04",
+    "ticker": "FND",
+    "strategy": "1D \u2014 Tier 2 High",
+    "interval": "1d",
+    "buy_price": 49.38,
+    "stop_loss": 47.78,
+    "result": "OPEN",
+    "date_bought": "2026-09-04",
+    "date_sold": "",
+    "exit_price": "",
+    "notes": ""
   }
 ]
