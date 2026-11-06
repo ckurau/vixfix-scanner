@@ -1059,10 +1059,10 @@
     "interval": "1wk",
     "buy_price": 156.27,
     "stop_loss": 144.89,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-07-31",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-11-05",
+    "exit_price": 176.5851,
     "notes": ""
   },
   {
@@ -1085,10 +1085,10 @@
     "interval": "1wk",
     "buy_price": 149.75,
     "stop_loss": 147.47,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-08-07",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-10-30",
+    "exit_price": 169.2175,
     "notes": ""
   },
   {
@@ -1371,10 +1371,10 @@
     "interval": "1wk",
     "buy_price": 129.58,
     "stop_loss": 123.16,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-10-16",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-11-04",
+    "exit_price": 146.4254,
     "notes": ""
   },
   {
@@ -1397,10 +1397,10 @@
     "interval": "1wk",
     "buy_price": 46.19,
     "stop_loss": 42.44,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-10-23",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-11-04",
+    "exit_price": 52.1947,
     "notes": ""
   },
   {
@@ -1449,10 +1449,10 @@
     "interval": "1wk",
     "buy_price": 130.35,
     "stop_loss": 129.08,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-10-30",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-11-04",
+    "exit_price": 147.2955,
     "notes": ""
   },
   {
@@ -1462,8 +1462,21 @@
     "interval": "1wk",
     "buy_price": 47.66,
     "stop_loss": 45.38,
-    "result": "OPEN",
+    "result": "WIN",
     "date_bought": "2026-10-30",
+    "date_sold": "2026-11-05",
+    "exit_price": 53.8558,
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-11-06",
+    "ticker": "KBH",
+    "strategy": "1WK \u2014 Tier 2 High",
+    "interval": "1wk",
+    "buy_price": 52.06,
+    "stop_loss": 48.46,
+    "result": "OPEN",
+    "date_bought": "2026-11-06",
     "date_sold": "",
     "exit_price": "",
     "notes": ""
