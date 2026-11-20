@@ -1358,10 +1358,10 @@
     "interval": "1wk",
     "buy_price": 10.83,
     "stop_loss": 10.59,
-    "result": "OPEN",
+    "result": "LOSS",
     "date_bought": "2026-10-16",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-11-18",
+    "exit_price": 10.59,
     "notes": ""
   },
   {
@@ -1423,10 +1423,10 @@
     "interval": "1wk",
     "buy_price": 10.89,
     "stop_loss": 10.69,
-    "result": "OPEN",
+    "result": "LOSS",
     "date_bought": "2026-10-23",
-    "date_sold": "",
-    "exit_price": "",
+    "date_sold": "2026-10-23",
+    "exit_price": 10.69,
     "notes": ""
   },
   {
@@ -1488,8 +1488,21 @@
     "interval": "1wk",
     "buy_price": 48.43,
     "stop_loss": 48.31,
-    "result": "OPEN",
+    "result": "LOSS",
     "date_bought": "2026-11-13",
+    "date_sold": "2026-11-13",
+    "exit_price": 48.31,
+    "notes": ""
+  },
+  {
+    "scan_date": "2026-11-20",
+    "ticker": "KBH",
+    "strategy": "1WK \u2014 Tier 2 High",
+    "interval": "1wk",
+    "buy_price": 45.72,
+    "stop_loss": 45.155,
+    "result": "OPEN",
+    "date_bought": "2026-11-20",
     "date_sold": "",
     "exit_price": "",
     "notes": ""
